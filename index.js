@@ -622,11 +622,20 @@ async function handleIncomingMessage(data) {
     if (!name) name = 'Unknown';
     const phone = contact?.phoneNumber || data.phoneNumber || data.phone || 'unknown';
     const phoneProfileId = contact?.phoneProfiles?.[0] || contact?.defaultPhoneNumber || data.phoneProfile || data.phone || '';
-    console.log(`[Contact] leadId=${leadId}, name="${name}", phone="${phone}", phoneProfileId="${phoneProfileId}", contact API returned: ${contact ? 'yes' : 'null'}`);
-    if (contact) console.log(`[Contact] API keys: ${Object.keys(contact).join(',')}`);
-    // Attach phoneProfileId to contact so sendMessage can use it
-    if (contact && !contact.phoneProfiles?.length && !contact.defaultPhoneNumber && phoneProfileId) {
-      contact.phoneProfiles = [phoneProfileId];
+    const telnyxPhoneId = (typeof msg === 'object' && msg?.telnyxPhoneId) || '';
+    console.log(`[Contact] leadId=${leadId}, name="${name}", phone="${phone}", phoneProfileId="${phoneProfileId}", telnyxPhoneId="${telnyxPhoneId}", contact API returned: ${contact ? 'yes' : 'null'}`);
+    if (contact) {
+      console.log(`[Contact] API keys: ${Object.keys(contact).join(',')}`);
+      console.log(`[Contact] phoneProfiles: ${JSON.stringify(contact.phoneProfiles)}, defaultPhoneNumber: ${contact.defaultPhoneNumber}`);
+      // Ensure contact has phone routing data
+      if (!contact.phoneProfiles?.length && phoneProfileId) {
+        contact.phoneProfiles = [phoneProfileId];
+      }
+      if (!contact.defaultPhoneNumber && phoneProfileId) {
+        contact.defaultPhoneNumber = phoneProfileId;
+      }
+      // Store telnyxPhoneId for outbound messaging
+      if (telnyxPhoneId) contact.telnyxPhoneId = telnyxPhoneId;
     }
 
     // Check if this lead is in a qualification flow
@@ -773,43 +782,57 @@ async function handleIncomingMessage(data) {
 // SEND MESSAGE VIA SOCKET
 // ============================================================
 async function sendMessage(leadId, message, contact) {
-  const phoneId = contact?.phoneProfiles?.[0] || contact?.defaultPhoneNumber;
+  const phoneProfile = contact?.phoneProfiles?.[0] || contact?.defaultPhoneNumber;
 
-  if (!phoneId) {
-    console.error(`[SendMsg] WARNING: No phoneId for lead ${leadId}. Contact keys: ${contact ? Object.keys(contact).join(',') : 'null'}`);
+  if (!phoneProfile) {
+    console.error(`[SendMsg] WARNING: No phoneProfile for lead ${leadId}. Contact keys: ${contact ? Object.keys(contact).join(',') : 'null'}`);
   }
 
-  // Try REST API first (more reliable than socket emit)
-  try {
-    const result = await apiRequest('POST', `/message/send`, {
-      leadId,
-      phoneId,
-      message,
-      scheduledAt: null,
-      images: [],
-    });
-    console.log(`[SendMsg] REST API response: ${result.status} for lead ${leadId}, phoneId=${phoneId}`);
-    if (result.status >= 200 && result.status < 300) return;
-    console.log(`[SendMsg] REST API non-200, falling back to socket emit`);
-  } catch (err) {
-    console.error(`[SendMsg] REST API failed: ${err.message}, falling back to socket emit`);
+  console.log(`[SendMsg] Attempting to send to lead ${leadId}, phoneProfile=${phoneProfile}, msg="${message.substring(0, 50)}..."`);
+
+  // Try multiple REST API endpoints
+  const apiEndpoints = [
+    { path: `/message`, body: { leadId, content: message, phoneProfile, type: 'outbound' } },
+    { path: `/messages`, body: { leadId, content: message, phoneProfile } },
+    { path: `/lead/${leadId}/message`, body: { content: message, phoneProfile } },
+    { path: `/conversation/${leadId}`, body: { content: message, phoneProfile } },
+  ];
+
+  for (const endpoint of apiEndpoints) {
+    try {
+      const result = await apiRequest('POST', endpoint.path, endpoint.body);
+      console.log(`[SendMsg] REST ${endpoint.path}: ${result.status} — ${JSON.stringify(result.data).substring(0, 200)}`);
+      if (result.status >= 200 && result.status < 300) return;
+    } catch (err) {
+      console.log(`[SendMsg] REST ${endpoint.path} error: ${err.message}`);
+    }
   }
 
-  // Fallback: socket emit
+  // Fallback: try multiple socket emit event names and payload formats
   if (!socket || !socket.connected) {
     console.error('[SendMsg] Cannot send via socket - not connected');
     return;
   }
 
-  socket.emit('sendMessage', {
+  // Try the most common socket event names
+  const socketPayload = {
     leadId,
-    phoneId,
+    phoneProfile,
+    phoneId: phoneProfile,
+    content: message,
     message,
+    type: 'outbound',
+    userId: CONFIG.userId,
     scheduledAt: null,
     images: [],
-  });
+  };
 
-  console.log(`[SendMsg] Socket emit sent to lead ${leadId}, phoneId=${phoneId}`);
+  socket.emit('sendMessage', socketPayload);
+  console.log(`[SendMsg] Socket 'sendMessage' emitted for lead ${leadId}`);
+
+  // Also try 'send-message' event name
+  socket.emit('send-message', socketPayload);
+  console.log(`[SendMsg] Socket 'send-message' emitted for lead ${leadId}`);
 }
 
 // ============================================================
