@@ -848,6 +848,11 @@ async function sendMessage(leadId, message, contact) {
       });
       activeConversationLeadId = leadId;
       console.log(`[SendMsg] Conversation initialized for lead ${leadId}`);
+
+      // CRITICAL: Wait 2s after init before sending — the server double-processes
+      // sendMessage when it arrives immediately after conversationInit
+      await new Promise(resolve => setTimeout(resolve, 2000));
+      console.log(`[SendMsg] Post-init delay complete, now sending`);
     } catch (err) {
       console.error(`[SendMsg] conversationInit error: ${err.message}`);
     }
