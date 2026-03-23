@@ -443,7 +443,7 @@ async function handleQualificationStep(leadId, content, contact) {
 
     // Send first question
     const firstStep = QUALIFICATION_STEPS[0];
-    sendMessage(leadId, firstStep.question, contact);
+    await sendMessage(leadId, firstStep.question, contact);
     console.log(`[Qualify] Started flow for ${leadId}, step 0: ${firstStep.id}`);
 
     await sendSlackNotification(
@@ -462,7 +462,7 @@ async function handleQualificationStep(leadId, content, contact) {
 
     if (midFlowClassification === 'nice_no') {
       const closer = getRandomCloser();
-      sendMessage(leadId, closer, contact);
+      await sendMessage(leadId, closer, contact);
       await addTagToContact(leadId, CONFIG.notInterestedTagId);
       await sendSlackNotification(
         `↩️ *${contact?.firstName || 'Unknown'}* opted out during qualification — warm closed & tagged`
@@ -490,7 +490,7 @@ async function handleQualificationStep(leadId, content, contact) {
   if (flow.step < QUALIFICATION_STEPS.length) {
     // Send next question
     const nextStep = QUALIFICATION_STEPS[flow.step];
-    sendMessage(leadId, nextStep.question, contact);
+    await sendMessage(leadId, nextStep.question, contact);
     console.log(`[Qualify] Next step ${flow.step}: ${nextStep.id}`);
   } else {
     // Qualification complete — send summary to Slack for approval
@@ -546,7 +546,7 @@ async function handleQualificationStep(leadId, content, contact) {
     }
 
     // Send a holding message to the lead
-    sendMessage(leadId, "Thanks for all that info! Let me put together the best options for you. Someone will be in touch shortly!", contact);
+    await sendMessage(leadId, "Thanks for all that info! Let me put together the best options for you. Someone will be in touch shortly!", contact);
 
     console.log(`[Qualify] Lead ${leadId} fully qualified. Summary sent to Slack.`);
   }
@@ -653,7 +653,7 @@ async function handleIncomingMessage(data) {
 
       case 'interested': {
         // Start the qualification flow
-        sendMessage(leadId, "Hey! Thanks for reaching out. I'd love to help you find the right coverage. Let me ask a few quick questions so I can match you with the best options.", contact);
+        await sendMessage(leadId, "Hey! Thanks for reaching out. I'd love to help you find the right coverage. Let me ask a few quick questions so I can match you with the best options.", contact);
         await handleQualificationStep(leadId, null, contact);
 
         await sendSlackNotification(
@@ -772,16 +772,33 @@ async function handleIncomingMessage(data) {
 // ============================================================
 // SEND MESSAGE VIA SOCKET
 // ============================================================
-function sendMessage(leadId, message, contact) {
-  if (!socket || !socket.connected) {
-    console.error('[Socket] Cannot send message - not connected');
-    return;
-  }
-
+async function sendMessage(leadId, message, contact) {
   const phoneId = contact?.phoneProfiles?.[0] || contact?.defaultPhoneNumber;
 
   if (!phoneId) {
-    console.error(`[Socket] WARNING: No phoneId for lead ${leadId}. Contact keys: ${contact ? Object.keys(contact).join(',') : 'null'}`);
+    console.error(`[SendMsg] WARNING: No phoneId for lead ${leadId}. Contact keys: ${contact ? Object.keys(contact).join(',') : 'null'}`);
+  }
+
+  // Try REST API first (more reliable than socket emit)
+  try {
+    const result = await apiRequest('POST', `/message/send`, {
+      leadId,
+      phoneId,
+      message,
+      scheduledAt: null,
+      images: [],
+    });
+    console.log(`[SendMsg] REST API response: ${result.status} for lead ${leadId}, phoneId=${phoneId}`);
+    if (result.status >= 200 && result.status < 300) return;
+    console.log(`[SendMsg] REST API non-200, falling back to socket emit`);
+  } catch (err) {
+    console.error(`[SendMsg] REST API failed: ${err.message}, falling back to socket emit`);
+  }
+
+  // Fallback: socket emit
+  if (!socket || !socket.connected) {
+    console.error('[SendMsg] Cannot send via socket - not connected');
+    return;
   }
 
   socket.emit('sendMessage', {
@@ -792,7 +809,7 @@ function sendMessage(leadId, message, contact) {
     images: [],
   });
 
-  console.log(`[Socket] Message sent to lead ${leadId}, phoneId=${phoneId}`);
+  console.log(`[SendMsg] Socket emit sent to lead ${leadId}, phoneId=${phoneId}`);
 }
 
 // ============================================================
@@ -915,7 +932,7 @@ function startHttpServer() {
               case 'approve': {
                 // Send the draft message
                 if (draft) {
-                  sendMessage(leadId, draft, contact);
+                  await sendMessage(leadId, draft, contact);
                   console.log(`[Slack] Approved and sent draft to ${leadId}`);
                 }
                 pendingApprovals.delete(actionId);
@@ -930,10 +947,10 @@ function startHttpServer() {
               case 'qualify': {
                 // Start qualification flow for this lead
                 const firstStep = QUALIFICATION_STEPS[0];
-                sendMessage(leadId, "Hey! I'd love to help you find the right coverage. Let me ask a few quick questions.", contact);
+                await sendMessage(leadId, "Hey! I'd love to help you find the right coverage. Let me ask a few quick questions.", contact);
 
                 const flow = startQualificationFlow(leadId, contact);
-                sendMessage(leadId, firstStep.question, contact);
+                await sendMessage(leadId, firstStep.question, contact);
 
                 pendingApprovals.delete(actionId);
 
@@ -992,6 +1009,39 @@ function startHttpServer() {
           res.end();
         }
       });
+      return;
+    }
+
+    // Debug endpoint: GET /debug-contact?id=LEAD_ID
+    if (req.url?.startsWith('/debug-contact') && req.method === 'GET') {
+      (async () => {
+        try {
+          const url = new URL(req.url, `http://localhost`);
+          const leadId = url.searchParams.get('id');
+          if (!leadId) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'Missing ?id= parameter' }));
+            return;
+          }
+          const contact = await getContactInfo(leadId);
+          const result = {
+            leadId,
+            contactFound: !!contact,
+            contactKeys: contact ? Object.keys(contact) : [],
+            firstName: contact?.firstName || null,
+            lastName: contact?.lastName || null,
+            phoneNumber: contact?.phoneNumber || null,
+            phoneProfiles: contact?.phoneProfiles || null,
+            defaultPhoneNumber: contact?.defaultPhoneNumber || null,
+            phone: contact?.phone || null,
+          };
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify(result, null, 2));
+        } catch (err) {
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: err.message }));
+        }
+      })();
       return;
     }
 
