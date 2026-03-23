@@ -1007,6 +1007,11 @@ function connectSocket() {
     reconnectionDelayMax: 30000,
   });
 
+  // DEBUG: Log ALL events from the server
+  socket.onAny((eventName, ...args) => {
+    console.log(`[Socket] EVENT: "${eventName}" — data keys: ${args[0] ? Object.keys(args[0]).join(',') : 'none'}`);
+  });
+
   socket.on('connect', () => {
     console.log(`[Socket] Connected! Socket ID: ${socket.id}`);
 
@@ -1016,6 +1021,16 @@ function connectSocket() {
       disconnectTimer = null;
       console.log('[Socket] Reconnected before disconnect notification was sent — suppressed');
     }
+
+    // Start ping interval (every 60s) and version interval (every 30s) like the real app
+    if (global._pingInterval) clearInterval(global._pingInterval);
+    if (global._versionInterval) clearInterval(global._versionInterval);
+    global._pingInterval = setInterval(() => {
+      socket.emit('ping', null, () => {});
+    }, 60000);
+    global._versionInterval = setInterval(() => {
+      socket.emit('version', null, () => {});
+    }, 30000);
 
     // Only send connect notification if enough time has passed
     const now = Date.now();
@@ -1048,29 +1063,29 @@ function connectSocket() {
     console.error(`[Socket] Connection error: ${err.message}`);
   });
 
-  socket.on('$incoming-message', (data) => {
-    console.log('[Socket] $incoming-message event received');
+  socket.on('incoming-message', (data) => {
+    console.log('[Socket] incoming-message event received');
     handleIncomingMessage(data);
   });
 
-  socket.on('$conversation-log', (data) => {
+  socket.on('conversation-log', (data) => {
     if (data?.type === 'inbound') {
-      console.log('[Socket] $conversation-log inbound event');
+      console.log('[Socket] conversation-log inbound event');
       handleIncomingMessage(data);
     }
   });
 
-  socket.on('$message-response', (data) => {
+  socket.on('message-response', (data) => {
     console.log(`[Socket] Message response:`, data?.status || 'unknown');
   });
 
-  socket.on('$force-refresh', () => {
+  socket.on('force-refresh', () => {
     console.log('[Socket] Force refresh - reconnecting...');
     socket.disconnect();
     setTimeout(connectSocket, 5000);
   });
 
-  socket.on('$force-logout', () => {
+  socket.on('force-logout', () => {
     console.error('[Socket] Force logout!');
     sendSlackNotification('🚨 *Force Logout* — Update access token immediately!');
   });
