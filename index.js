@@ -595,13 +595,18 @@ async function handleIncomingMessage(data) {
       processedMessages = new Set(arr.slice(-5000));
     }
 
-    const content = data.content || data.message || '';
+    // data.message can be an object with body/text/content, or a string
+    const msg = data.message;
+    const content = typeof msg === 'string' ? msg
+      : (msg?.body || msg?.text || msg?.content || data.content || '');
     const leadId = data.leadId;
-    const type = data.type || 'inbound'; // incoming-message events are always inbound
 
-    // For incoming-message events, type may not be present — they're always inbound
-    if (type !== 'inbound') return;
-    if (!content.trim()) return; // Skip empty messages
+    console.log(`[Handler] message type: ${typeof msg}, content resolved: "${content}"`);
+    if (typeof msg === 'object' && msg) {
+      console.log(`[Handler] message keys: ${Object.keys(msg).join(',')}`);
+    }
+
+    if (!content || !String(content).trim()) return; // Skip empty messages
 
     console.log(`\n[Message] New inbound from lead ${leadId}: "${content}"`);
 
