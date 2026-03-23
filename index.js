@@ -496,8 +496,9 @@ async function handleQualificationStep(leadId, content, contact) {
     // Qualification complete — send summary to Slack for approval
     qualificationFlows.delete(leadId);
 
-    const name = contact ? `${contact.firstName || ''} ${contact.lastName || ''}`.trim() : 'Unknown';
+    const name = contact ? `${contact.firstName || ''} ${contact.lastName || ''}`.trim() || 'Unknown' : 'Unknown';
     const phone = contact?.phoneNumber || 'unknown';
+    const phoneProfileId = contact?.phoneProfiles?.[0] || contact?.defaultPhoneNumber || '';
 
     const summary =
       `*QUALIFIED LEAD: ${name}*\n` +
@@ -529,13 +530,13 @@ async function handleQualificationStep(leadId, content, contact) {
               text: { type: 'plain_text', text: 'Mark as Called' },
               style: 'primary',
               action_id: `called_${actionId}`,
-              value: JSON.stringify({ leadId, name, phone }),
+              value: JSON.stringify({ leadId, name, phone, phoneProfileId }),
             },
             {
               type: 'button',
               text: { type: 'plain_text', text: 'Remind Me Later' },
               action_id: `remind_${actionId}`,
-              value: JSON.stringify({ leadId, name, phone }),
+              value: JSON.stringify({ leadId, name, phone, phoneProfileId }),
             },
           ],
         },
@@ -620,7 +621,13 @@ async function handleIncomingMessage(data) {
     }
     if (!name) name = 'Unknown';
     const phone = contact?.phoneNumber || data.phoneNumber || data.phone || 'unknown';
-    console.log(`[Contact] leadId=${leadId}, name="${name}", phone="${phone}", contact API returned: ${contact ? 'yes' : 'null'}`);
+    const phoneProfileId = contact?.phoneProfiles?.[0] || contact?.defaultPhoneNumber || data.phoneProfile || data.phone || '';
+    console.log(`[Contact] leadId=${leadId}, name="${name}", phone="${phone}", phoneProfileId="${phoneProfileId}", contact API returned: ${contact ? 'yes' : 'null'}`);
+    if (contact) console.log(`[Contact] API keys: ${Object.keys(contact).join(',')}`);
+    // Attach phoneProfileId to contact so sendMessage can use it
+    if (contact && !contact.phoneProfiles?.length && !contact.defaultPhoneNumber && phoneProfileId) {
+      contact.phoneProfiles = [phoneProfileId];
+    }
 
     // Check if this lead is in a qualification flow
     if (qualificationFlows.has(leadId)) {
@@ -679,20 +686,20 @@ async function handleIncomingMessage(data) {
                   text: { type: 'plain_text', text: 'Send Draft' },
                   style: 'primary',
                   action_id: `approve_${actionId}`,
-                  value: JSON.stringify({ leadId, name, phone, draft }),
+                  value: JSON.stringify({ leadId, name, phone, phoneProfileId, draft }),
                 },
                 {
                   type: 'button',
                   text: { type: 'plain_text', text: 'Start Qualification' },
                   action_id: `qualify_${actionId}`,
-                  value: JSON.stringify({ leadId, name, phone }),
+                  value: JSON.stringify({ leadId, name, phone, phoneProfileId }),
                 },
                 {
                   type: 'button',
                   text: { type: 'plain_text', text: 'Ignore' },
                   style: 'danger',
                   action_id: `ignore_${actionId}`,
-                  value: JSON.stringify({ leadId, name }),
+                  value: JSON.stringify({ leadId, name, phoneProfileId }),
                 },
               ],
             },
@@ -728,19 +735,19 @@ async function handleIncomingMessage(data) {
                   text: { type: 'plain_text', text: 'Start Qualification' },
                   style: 'primary',
                   action_id: `qualify_${actionId}`,
-                  value: JSON.stringify({ leadId, name, phone }),
+                  value: JSON.stringify({ leadId, name, phone, phoneProfileId }),
                 },
                 {
                   type: 'button',
                   text: { type: 'plain_text', text: 'Not Interested' },
                   action_id: `notinterested_${actionId}`,
-                  value: JSON.stringify({ leadId, name }),
+                  value: JSON.stringify({ leadId, name, phoneProfileId }),
                 },
                 {
                   type: 'button',
                   text: { type: 'plain_text', text: 'I\'ll Handle It' },
                   action_id: `ignore_${actionId}`,
-                  value: JSON.stringify({ leadId, name }),
+                  value: JSON.stringify({ leadId, name, phoneProfileId }),
                 },
               ],
             },
@@ -773,6 +780,10 @@ function sendMessage(leadId, message, contact) {
 
   const phoneId = contact?.phoneProfiles?.[0] || contact?.defaultPhoneNumber;
 
+  if (!phoneId) {
+    console.error(`[Socket] WARNING: No phoneId for lead ${leadId}. Contact keys: ${contact ? Object.keys(contact).join(',') : 'null'}`);
+  }
+
   socket.emit('sendMessage', {
     leadId,
     phoneId,
@@ -781,7 +792,7 @@ function sendMessage(leadId, message, contact) {
     images: [],
   });
 
-  console.log(`[Socket] Message sent to lead ${leadId}`);
+  console.log(`[Socket] Message sent to lead ${leadId}, phoneId=${phoneId}`);
 }
 
 // ============================================================
@@ -863,13 +874,25 @@ function startHttpServer() {
                 const buttonValue = JSON.parse(action.value || '{}');
                 if (buttonValue.leadId) {
                   const contact = await getContactInfo(buttonValue.leadId);
+                  // Build a fallback contact with phoneProfiles so sendMessage works
+                  const fallbackContact = {
+                    firstName: buttonValue.name,
+                    phoneNumber: buttonValue.phone,
+                    phoneProfiles: buttonValue.phoneProfileId ? [buttonValue.phoneProfileId] : [],
+                    defaultPhoneNumber: buttonValue.phoneProfileId || buttonValue.phone,
+                  };
+                  // If API returned a contact, make sure it has phone info
+                  if (contact && !contact.phoneProfiles?.length && !contact.defaultPhoneNumber) {
+                    contact.phoneProfiles = fallbackContact.phoneProfiles;
+                    contact.defaultPhoneNumber = fallbackContact.defaultPhoneNumber;
+                  }
                   pending = {
                     leadId: buttonValue.leadId,
                     draft: buttonValue.draft || null,
-                    contact: contact || { firstName: buttonValue.name, phoneNumber: buttonValue.phone },
+                    contact: contact || fallbackContact,
                     content: buttonValue.content || '',
                   };
-                  console.log(`[Slack] Reconstructed pending for lead ${buttonValue.leadId}`);
+                  console.log(`[Slack] Reconstructed pending for lead ${buttonValue.leadId}, phoneProfileId: ${buttonValue.phoneProfileId}`);
                 }
               } catch (parseErr) {
                 console.log('[Slack] Could not parse button value:', parseErr.message);
