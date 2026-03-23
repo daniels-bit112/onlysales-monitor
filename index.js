@@ -920,6 +920,10 @@ function startHttpServer() {
       let body = '';
       req.on('data', (chunk) => body += chunk);
       req.on('end', async () => {
+        // IMMEDIATELY respond 200 to Slack to prevent retries (Slack retries after 3s)
+        res.writeHead(200);
+        res.end();
+
         try {
           // Slack sends payload as form-encoded
           const params = new URLSearchParams(body);
@@ -974,8 +978,6 @@ function startHttpServer() {
               await respondToSlackInteraction(payload.response_url,
                 '*This action has expired.* A new notification will appear next time this lead texts.'
               );
-              res.writeHead(200);
-              res.end();
               return;
             }
 
@@ -1054,12 +1056,8 @@ function startHttpServer() {
             }
           }
 
-          res.writeHead(200);
-          res.end();
         } catch (err) {
           console.error('[HTTP] Error handling interaction:', err);
-          res.writeHead(200);
-          res.end();
         }
       });
       return;
