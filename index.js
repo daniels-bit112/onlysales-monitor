@@ -826,8 +826,8 @@ async function sendMessage(leadId, message, contact) {
     console.log(`[SendMsg] Conversation already active for lead ${leadId}, skipping init`);
   }
 
-  // Step 2: Send the message (within the initialized conversation)
-  socket.emit('sendMessage', {
+  // Step 2: Send the message (volatile prevents socket.io retry on disconnect)
+  socket.volatile.emit('sendMessage', {
     message,
     scheduledAt: null,
     images: [],
