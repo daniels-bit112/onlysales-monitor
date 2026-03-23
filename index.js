@@ -63,6 +63,9 @@ const qualificationFlows = new Map();
 // Pending Slack approvals: actionId -> { leadId, draft, contact }
 const pendingApprovals = new Map();
 
+// Track active conversation to avoid duplicate conversationInit calls
+let activeConversationLeadId = null;
+
 // Connection notification cooldown (prevents spam on flaky connections)
 let lastConnectNotify = 0;
 let lastDisconnectNotify = 0;
@@ -795,26 +798,32 @@ async function sendMessage(leadId, message, contact) {
 
   console.log(`[SendMsg] Sending to lead ${leadId}, phoneId=${phoneId}, msg="${message.substring(0, 50)}..."`);
 
-  // Step 1: Initialize the conversation (required before sendMessage)
-  try {
-    await new Promise((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        console.log('[SendMsg] conversationInit: no callback after 3s, proceeding anyway');
-        resolve();
-      }, 3000);
+  // Step 1: Initialize the conversation only if switching to a different lead
+  if (activeConversationLeadId !== leadId) {
+    try {
+      await new Promise((resolve) => {
+        const timeout = setTimeout(() => {
+          console.log('[SendMsg] conversationInit: no callback after 3s, proceeding anyway');
+          resolve();
+        }, 3000);
 
-      socket.emit('conversationInit', {
-        leadId,
-        phoneId,
-        isTransferred: false,
-      }, (response) => {
-        clearTimeout(timeout);
-        console.log(`[SendMsg] conversationInit ack: ${JSON.stringify(response)?.substring(0, 200)}`);
-        resolve(response);
+        socket.emit('conversationInit', {
+          leadId,
+          phoneId,
+          isTransferred: false,
+        }, (response) => {
+          clearTimeout(timeout);
+          console.log(`[SendMsg] conversationInit ack: ${JSON.stringify(response)?.substring(0, 200)}`);
+          resolve(response);
+        });
       });
-    });
-  } catch (err) {
-    console.error(`[SendMsg] conversationInit error: ${err.message}`);
+      activeConversationLeadId = leadId;
+      console.log(`[SendMsg] Conversation initialized for lead ${leadId}`);
+    } catch (err) {
+      console.error(`[SendMsg] conversationInit error: ${err.message}`);
+    }
+  } else {
+    console.log(`[SendMsg] Conversation already active for lead ${leadId}, skipping init`);
   }
 
   // Step 2: Send the message (within the initialized conversation)
@@ -1192,6 +1201,7 @@ function connectSocket() {
 
   socket.on('disconnect', (reason) => {
     console.log(`[Socket] Disconnected: ${reason}`);
+    activeConversationLeadId = null; // Reset active conversation on disconnect
     if (reason !== 'io client disconnect') {
       // Delay disconnect notification — if we reconnect quickly, suppress it
       if (!disconnectTimer) {
