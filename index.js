@@ -782,57 +782,49 @@ async function handleIncomingMessage(data) {
 // SEND MESSAGE VIA SOCKET
 // ============================================================
 async function sendMessage(leadId, message, contact) {
-  const phoneProfile = contact?.phoneProfiles?.[0] || contact?.defaultPhoneNumber;
+  const phoneId = contact?.phoneProfiles?.[0] || contact?.defaultPhoneNumber;
 
-  if (!phoneProfile) {
-    console.error(`[SendMsg] WARNING: No phoneProfile for lead ${leadId}. Contact keys: ${contact ? Object.keys(contact).join(',') : 'null'}`);
+  if (!phoneId) {
+    console.error(`[SendMsg] WARNING: No phoneId for lead ${leadId}. Contact keys: ${contact ? Object.keys(contact).join(',') : 'null'}`);
   }
 
-  console.log(`[SendMsg] Attempting to send to lead ${leadId}, phoneProfile=${phoneProfile}, msg="${message.substring(0, 50)}..."`);
-
-  // Try multiple REST API endpoints
-  const apiEndpoints = [
-    { path: `/message`, body: { leadId, content: message, phoneProfile, type: 'outbound' } },
-    { path: `/messages`, body: { leadId, content: message, phoneProfile } },
-    { path: `/lead/${leadId}/message`, body: { content: message, phoneProfile } },
-    { path: `/conversation/${leadId}`, body: { content: message, phoneProfile } },
-  ];
-
-  for (const endpoint of apiEndpoints) {
-    try {
-      const result = await apiRequest('POST', endpoint.path, endpoint.body);
-      console.log(`[SendMsg] REST ${endpoint.path}: ${result.status} — ${JSON.stringify(result.data).substring(0, 200)}`);
-      if (result.status >= 200 && result.status < 300) return;
-    } catch (err) {
-      console.log(`[SendMsg] REST ${endpoint.path} error: ${err.message}`);
-    }
-  }
-
-  // Fallback: try multiple socket emit event names and payload formats
   if (!socket || !socket.connected) {
-    console.error('[SendMsg] Cannot send via socket - not connected');
+    console.error('[SendMsg] Cannot send - socket not connected');
     return;
   }
 
-  // Try the most common socket event names
-  const socketPayload = {
-    leadId,
-    phoneProfile,
-    phoneId: phoneProfile,
-    content: message,
+  console.log(`[SendMsg] Sending to lead ${leadId}, phoneId=${phoneId}, msg="${message.substring(0, 50)}..."`);
+
+  // Step 1: Initialize the conversation (required before sendMessage)
+  try {
+    await new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        console.log('[SendMsg] conversationInit: no callback after 3s, proceeding anyway');
+        resolve();
+      }, 3000);
+
+      socket.emit('conversationInit', {
+        leadId,
+        phoneId,
+        isTransferred: false,
+      }, (response) => {
+        clearTimeout(timeout);
+        console.log(`[SendMsg] conversationInit ack: ${JSON.stringify(response)?.substring(0, 200)}`);
+        resolve(response);
+      });
+    });
+  } catch (err) {
+    console.error(`[SendMsg] conversationInit error: ${err.message}`);
+  }
+
+  // Step 2: Send the message (within the initialized conversation)
+  socket.emit('sendMessage', {
     message,
-    type: 'outbound',
-    userId: CONFIG.userId,
     scheduledAt: null,
     images: [],
-  };
+  });
 
-  socket.emit('sendMessage', socketPayload);
-  console.log(`[SendMsg] Socket 'sendMessage' emitted for lead ${leadId}`);
-
-  // Also try 'send-message' event name
-  socket.emit('send-message', socketPayload);
-  console.log(`[SendMsg] Socket 'send-message' emitted for lead ${leadId}`);
+  console.log(`[SendMsg] sendMessage emitted for lead ${leadId}`);
 }
 
 // ============================================================
