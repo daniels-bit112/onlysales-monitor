@@ -954,6 +954,54 @@ function startHttpServer() {
       return;
     }
 
+    // Diagnostic endpoint: GET /test-slack
+    if (req.url === '/test-slack' && req.method === 'GET') {
+      (async () => {
+        const results = {};
+
+        // Test 1: Socket status
+        results.socket = {
+          connected: socket?.connected || false,
+          id: socket?.id || 'none',
+        };
+
+        // Test 2: Webhook
+        try {
+          await sendSlackNotification('🧪 *Test* — Webhook is working!');
+          results.webhook = 'OK';
+        } catch (err) {
+          results.webhook = `FAILED: ${err.message}`;
+        }
+
+        // Test 3: Bot token (chat.postMessage)
+        try {
+          await sendSlackBlocks(
+            [{
+              type: 'section',
+              text: { type: 'mrkdwn', text: '🧪 *Test* — Bot token + interactive buttons working!' },
+            },
+            {
+              type: 'actions',
+              elements: [{
+                type: 'button',
+                text: { type: 'plain_text', text: '✅ Looks good!' },
+                action_id: 'test_ok',
+                style: 'primary',
+              }],
+            }],
+            'Test — Bot token working!'
+          );
+          results.botToken = 'OK';
+        } catch (err) {
+          results.botToken = `FAILED: ${err.message}`;
+        }
+
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(results, null, 2));
+      })();
+      return;
+    }
+
     // 404 for everything else
     res.writeHead(404);
     res.end('Not found');
