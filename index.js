@@ -46,7 +46,7 @@ const CONFIG = {
 
   // Intervals
   tokenRefreshIntervalMs: 60 * 60 * 1000,
-  heartbeatIntervalMs: 30 * 1000,
+  heartbeatIntervalMs: 90 * 1000,  // 90s ping interval (was 30s — too aggressive, caused disconnects)
   qualificationTimeoutMs: 24 * 60 * 60 * 1000, // 24h timeout for qualification
 };
 
@@ -581,9 +581,6 @@ function getRandomCloser() {
 // ============================================================
 async function handleIncomingMessage(data) {
   try {
-    console.log(`[Handler] Data keys: ${Object.keys(data).join(',')}`);
-    console.log(`[Handler] message: "${data.message}", type: "${data.type}", leadId: "${data.leadId}", status: "${data.status}"`);
-
     const messageId = data._id || data.id || `${data.leadId}-${Date.now()}`;
 
     if (processedMessages.has(messageId)) return;
@@ -600,13 +597,16 @@ async function handleIncomingMessage(data) {
     const content = typeof msg === 'string' ? msg
       : (msg?.body || msg?.text || msg?.content || data.content || '');
     const leadId = data.leadId;
+    const type = data.type || 'inbound'; // incoming-message events are always inbound
 
+    console.log(`[Handler] Data keys: ${Object.keys(data).join(',')}`);
     console.log(`[Handler] message type: ${typeof msg}, content resolved: "${content}"`);
     if (typeof msg === 'object' && msg) {
       console.log(`[Handler] message keys: ${Object.keys(msg).join(',')}`);
     }
 
-    if (!content || !String(content).trim()) return; // Skip empty messages
+    if (type !== 'inbound') return;
+    if (!String(content).trim()) return; // Skip empty messages
 
     console.log(`\n[Message] New inbound from lead ${leadId}: "${content}"`);
 
@@ -1016,11 +1016,6 @@ function connectSocket() {
     reconnectionDelayMax: 30000,
   });
 
-  // DEBUG: Log ALL events from the server
-  socket.onAny((eventName, ...args) => {
-    console.log(`[Socket] EVENT: "${eventName}" — data keys: ${args[0] ? Object.keys(args[0]).join(',') : 'none'}`);
-  });
-
   socket.on('connect', () => {
     console.log(`[Socket] Connected! Socket ID: ${socket.id}`);
 
@@ -1030,16 +1025,6 @@ function connectSocket() {
       disconnectTimer = null;
       console.log('[Socket] Reconnected before disconnect notification was sent — suppressed');
     }
-
-    // Start ping interval (every 60s) and version interval (every 30s) like the real app
-    if (global._pingInterval) clearInterval(global._pingInterval);
-    if (global._versionInterval) clearInterval(global._versionInterval);
-    global._pingInterval = setInterval(() => {
-      socket.emit('ping', null, () => {});
-    }, 60000);
-    global._versionInterval = setInterval(() => {
-      socket.emit('version', null, () => {});
-    }, 30000);
 
     // Only send connect notification if enough time has passed
     const now = Date.now();
@@ -1072,6 +1057,11 @@ function connectSocket() {
     console.error(`[Socket] Connection error: ${err.message}`);
   });
 
+  // Debug: log ALL events from the server
+  socket.onAny((eventName, ...args) => {
+    console.log(`[Socket] EVENT: "${eventName}" — data keys: ${args[0] ? Object.keys(args[0]).join(',') : 'none'}`);
+  });
+
   socket.on('incoming-message', (data) => {
     console.log('[Socket] incoming-message event received');
     handleIncomingMessage(data);
@@ -1099,10 +1089,10 @@ function connectSocket() {
     sendSlackNotification('🚨 *Force Logout* — Update access token immediately!');
   });
 
+  // Heartbeat: only emit ping (version emit was causing server to drop connection)
   setInterval(() => {
     if (socket.connected) {
       socket.emit('ping');
-      socket.emit('version');
     }
   }, CONFIG.heartbeatIntervalMs);
 }
