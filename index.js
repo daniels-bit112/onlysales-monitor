@@ -817,56 +817,25 @@ async function sendMessage(leadId, message, contact) {
 
   console.log(`[SendMsg] Sending to lead ${leadId}, phoneId=${phoneId}, msg="${message.substring(0, 50)}..."`);
 
-  // Step 1: Initialize the conversation only if switching to a different lead
-  if (activeConversationLeadId !== leadId) {
-    try {
-      await new Promise((resolve) => {
-        const timeout = setTimeout(() => {
-          console.log('[SendMsg] conversationInit: no callback after 3s, proceeding anyway');
-          resolve();
-        }, 3000);
-
-        socket.emit('conversationInit', {
-          leadId,
-          phoneId,
-          isTransferred: false,
-        }, (response) => {
-          clearTimeout(timeout);
-          console.log(`[SendMsg] conversationInit ack: ${JSON.stringify(response)?.substring(0, 200)}`);
-          resolve(response);
-        });
-      });
-      activeConversationLeadId = leadId;
-      console.log(`[SendMsg] Conversation initialized for lead ${leadId}`);
-    } catch (err) {
-      console.error(`[SendMsg] conversationInit error: ${err.message}`);
-    }
-  } else {
-    console.log(`[SendMsg] Conversation already active for lead ${leadId}, skipping init`);
-  }
-
-  // Step 2: Wait a beat after conversationInit so the server finishes setup
-  await new Promise(resolve => setTimeout(resolve, 500));
-
-  // Step 3: Send the message with ack callback for debugging
-  return new Promise((resolve) => {
-    const ackTimeout = setTimeout(() => {
-      console.log(`[SendMsg] sendMessage: no ack after 5s for lead ${leadId}`);
-      resolve();
-    }, 5000);
-
-    socket.emit('sendMessage', {
-      message,
-      scheduledAt: null,
-      images: [],
-    }, (response) => {
-      clearTimeout(ackTimeout);
-      console.log(`[SendMsg] sendMessage ack for lead ${leadId}:`, JSON.stringify(response)?.substring(0, 300));
-      resolve(response);
-    });
-
-    console.log(`[SendMsg] sendMessage emitted for lead ${leadId}`);
+  // Step 1: Initialize the conversation (always, no callback — matches web app behavior)
+  socket.emit('conversationInit', {
+    leadId,
+    phoneId,
+    isTransferred: false,
   });
+  console.log(`[SendMsg] conversationInit emitted for lead ${leadId}`);
+
+  // Step 2: Wait for server to process init before sending
+  await new Promise(resolve => setTimeout(resolve, 1000));
+
+  // Step 3: Plain emit — NO callback, NO volatile (exactly like the web app)
+  socket.emit('sendMessage', {
+    message,
+    scheduledAt: null,
+    images: [],
+  });
+
+  console.log(`[SendMsg] sendMessage emitted for lead ${leadId}`);
 }
 
 // ============================================================
