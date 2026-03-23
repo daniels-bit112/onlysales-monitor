@@ -845,14 +845,28 @@ async function sendMessage(leadId, message, contact) {
     console.log(`[SendMsg] Conversation already active for lead ${leadId}, skipping init`);
   }
 
-  // Step 2: Send the message (volatile prevents socket.io retry on disconnect)
-  socket.volatile.emit('sendMessage', {
-    message,
-    scheduledAt: null,
-    images: [],
-  });
+  // Step 2: Wait a beat after conversationInit so the server finishes setup
+  await new Promise(resolve => setTimeout(resolve, 500));
 
-  console.log(`[SendMsg] sendMessage emitted for lead ${leadId}`);
+  // Step 3: Send the message with ack callback for debugging
+  return new Promise((resolve) => {
+    const ackTimeout = setTimeout(() => {
+      console.log(`[SendMsg] sendMessage: no ack after 5s for lead ${leadId}`);
+      resolve();
+    }, 5000);
+
+    socket.emit('sendMessage', {
+      message,
+      scheduledAt: null,
+      images: [],
+    }, (response) => {
+      clearTimeout(ackTimeout);
+      console.log(`[SendMsg] sendMessage ack for lead ${leadId}:`, JSON.stringify(response)?.substring(0, 300));
+      resolve(response);
+    });
+
+    console.log(`[SendMsg] sendMessage emitted for lead ${leadId}`);
+  });
 }
 
 // ============================================================
