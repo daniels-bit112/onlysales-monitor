@@ -529,11 +529,13 @@ async function handleQualificationStep(leadId, content, contact) {
               text: { type: 'plain_text', text: 'Mark as Called' },
               style: 'primary',
               action_id: `called_${actionId}`,
+              value: JSON.stringify({ leadId, name, phone }),
             },
             {
               type: 'button',
               text: { type: 'plain_text', text: 'Remind Me Later' },
               action_id: `remind_${actionId}`,
+              value: JSON.stringify({ leadId, name, phone }),
             },
           ],
         },
@@ -611,8 +613,14 @@ async function handleIncomingMessage(data) {
     console.log(`\n[Message] New inbound from lead ${leadId}: "${content}"`);
 
     const contact = await getContactInfo(leadId);
-    const name = contact ? `${contact.firstName || ''} ${contact.lastName || ''}`.trim() : 'Unknown';
-    const phone = contact?.phoneNumber || 'unknown';
+    // Try to get name from contact API, fall back to socket data
+    let name = contact ? `${contact.firstName || ''} ${contact.lastName || ''}`.trim() : '';
+    if (!name && data.lead) {
+      name = `${data.lead.firstName || ''} ${data.lead.lastName || ''}`.trim();
+    }
+    if (!name) name = 'Unknown';
+    const phone = contact?.phoneNumber || data.phoneNumber || data.phone || 'unknown';
+    console.log(`[Contact] leadId=${leadId}, name="${name}", phone="${phone}", contact API returned: ${contact ? 'yes' : 'null'}`);
 
     // Check if this lead is in a qualification flow
     if (qualificationFlows.has(leadId)) {
@@ -671,17 +679,20 @@ async function handleIncomingMessage(data) {
                   text: { type: 'plain_text', text: 'Send Draft' },
                   style: 'primary',
                   action_id: `approve_${actionId}`,
+                  value: JSON.stringify({ leadId, name, phone, draft }),
                 },
                 {
                   type: 'button',
                   text: { type: 'plain_text', text: 'Start Qualification' },
                   action_id: `qualify_${actionId}`,
+                  value: JSON.stringify({ leadId, name, phone }),
                 },
                 {
                   type: 'button',
                   text: { type: 'plain_text', text: 'Ignore' },
                   style: 'danger',
                   action_id: `ignore_${actionId}`,
+                  value: JSON.stringify({ leadId, name }),
                 },
               ],
             },
@@ -717,16 +728,19 @@ async function handleIncomingMessage(data) {
                   text: { type: 'plain_text', text: 'Start Qualification' },
                   style: 'primary',
                   action_id: `qualify_${actionId}`,
+                  value: JSON.stringify({ leadId, name, phone }),
                 },
                 {
                   type: 'button',
                   text: { type: 'plain_text', text: 'Not Interested' },
                   action_id: `notinterested_${actionId}`,
+                  value: JSON.stringify({ leadId, name }),
                 },
                 {
                   type: 'button',
                   text: { type: 'plain_text', text: 'I\'ll Handle It' },
                   action_id: `ignore_${actionId}`,
+                  value: JSON.stringify({ leadId, name }),
                 },
               ],
             },
@@ -840,9 +854,33 @@ function startHttpServer() {
             const actionType = actionParts[0];
             const actionId = actionParts.slice(1).join('_');
 
-            const pending = pendingApprovals.get(actionId);
+            let pending = pendingApprovals.get(actionId);
+
+            // If not in memory (lost after redeploy), reconstruct from button value
             if (!pending) {
-              console.log('[Slack] Action not found:', actionId);
+              console.log('[Slack] Action not in memory, reconstructing from button value');
+              try {
+                const buttonValue = JSON.parse(action.value || '{}');
+                if (buttonValue.leadId) {
+                  const contact = await getContactInfo(buttonValue.leadId);
+                  pending = {
+                    leadId: buttonValue.leadId,
+                    draft: buttonValue.draft || null,
+                    contact: contact || { firstName: buttonValue.name, phoneNumber: buttonValue.phone },
+                    content: buttonValue.content || '',
+                  };
+                  console.log(`[Slack] Reconstructed pending for lead ${buttonValue.leadId}`);
+                }
+              } catch (parseErr) {
+                console.log('[Slack] Could not parse button value:', parseErr.message);
+              }
+            }
+
+            if (!pending) {
+              console.log('[Slack] Action expired and could not reconstruct:', actionId);
+              await respondToSlackInteraction(payload.response_url,
+                '*This action has expired.* A new notification will appear next time this lead texts.'
+              );
               res.writeHead(200);
               res.end();
               return;
@@ -884,12 +922,10 @@ function startHttpServer() {
 
               case 'notinterested': {
                 await addTagToContact(leadId, CONFIG.notInterestedTagId);
-                const closer = getRandomCloser();
-                sendMessage(leadId, closer, contact);
                 pendingApprovals.delete(actionId);
 
                 await respondToSlackInteraction(payload.response_url,
-                  `*Tagged not interested* -- ${contact?.firstName || 'lead'}.`
+                  `*Tagged not interested* -- ${contact?.firstName || 'lead'}. No reply sent.`
                 );
                 break;
               }
