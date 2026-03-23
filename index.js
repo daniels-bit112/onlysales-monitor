@@ -1211,6 +1211,13 @@ function connectSocket() {
   socket.on('connect', () => {
     console.log(`[Socket] Connected! Socket ID: ${socket.id}`);
 
+    // CRITICAL: Clear socket.io's send buffer on reconnect to prevent
+    // buffered sendMessage packets from being replayed (causes double-send)
+    if (socket.sendBuffer && socket.sendBuffer.length > 0) {
+      console.log(`[Socket] Clearing ${socket.sendBuffer.length} buffered packets to prevent duplicates`);
+      socket.sendBuffer = [];
+    }
+
     // Cancel any pending disconnect notification (reconnected quickly)
     if (disconnectTimer) {
       clearTimeout(disconnectTimer);
