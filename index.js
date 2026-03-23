@@ -66,6 +66,9 @@ const pendingApprovals = new Map();
 // Track active conversation to avoid duplicate conversationInit calls
 let activeConversationLeadId = null;
 
+// Dedup outgoing messages: "leadId:messageHash" -> timestamp
+const recentSentMessages = new Map();
+
 // Connection notification cooldown (prevents spam on flaky connections)
 let lastConnectNotify = 0;
 let lastDisconnectNotify = 0;
@@ -796,6 +799,22 @@ async function sendMessage(leadId, message, contact) {
     return;
   }
 
+  // Dedup: skip if same message was sent to same lead in last 10 seconds
+  const dedupKey = `${leadId}:${message}`;
+  const lastSent = recentSentMessages.get(dedupKey);
+  if (lastSent && Date.now() - lastSent < 10000) {
+    console.log(`[SendMsg] DEDUP: Skipping duplicate message to lead ${leadId}: "${message.substring(0, 40)}..."`);
+    return;
+  }
+  recentSentMessages.set(dedupKey, Date.now());
+  // Clean old entries
+  if (recentSentMessages.size > 100) {
+    const now = Date.now();
+    for (const [k, t] of recentSentMessages) {
+      if (now - t > 30000) recentSentMessages.delete(k);
+    }
+  }
+
   console.log(`[SendMsg] Sending to lead ${leadId}, phoneId=${phoneId}, msg="${message.substring(0, 50)}..."`);
 
   // Step 1: Initialize the conversation only if switching to a different lead
@@ -1232,10 +1251,8 @@ function connectSocket() {
   });
 
   socket.on('conversation-log', (data) => {
-    if (data?.type === 'inbound') {
-      console.log('[Socket] conversation-log inbound event');
-      handleIncomingMessage(data);
-    }
+    // Only log, do NOT re-process — incoming-message already handles inbound messages
+    console.log(`[Socket] conversation-log event, type=${data?.type || 'unknown'}`);
   });
 
   socket.on('message-response', (data) => {
