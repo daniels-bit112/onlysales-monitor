@@ -342,7 +342,7 @@ function classifyMessage(content) {
   }
 
   // Single affirmative characters
-  if (['y', '👍', '✅'].includes(lower)) return 'interested';
+  if (['y'].includes(lower)) return 'interested';
 
   // === QUESTION (ambiguous — might be interested) ===
   if (lower.includes('?') || lower.startsWith('what') || lower.startsWith('how') ||
@@ -447,7 +447,7 @@ async function handleQualificationStep(leadId, content, contact) {
     console.log(`[Qualify] Started flow for ${leadId}, step 0: ${firstStep.id}`);
 
     await sendSlackNotification(
-      `🚀 *Started qualification flow* for lead ${contact?.firstName || 'Unknown'}\n` +
+      `*Started qualification flow* for lead ${contact?.firstName || 'Unknown'}\n` +
       `Step 1/${QUALIFICATION_STEPS.length}: ${firstStep.id}`
     );
     return;
@@ -500,16 +500,16 @@ async function handleQualificationStep(leadId, content, contact) {
     const phone = contact?.phoneNumber || 'unknown';
 
     const summary =
-      `🎯 *QUALIFIED LEAD: ${name}*\n` +
-      `📱 Phone: ${phone}\n` +
-      `📍 ${contact?.city || ''}${contact?.state ? ', ' + contact.state : ''}\n\n` +
-      `📋 *Qualification Summary:*\n` +
-      `• Coverage: ${flow.data.coverage_type || 'N/A'}\n` +
-      `• Household: ${flow.data.household || 'N/A'}\n` +
-      `• Age(s): ${flow.data.age_range || 'N/A'}\n` +
-      `• Budget: ${flow.data.budget || 'N/A'}\n` +
-      `• Timeline: ${flow.data.timeline || 'N/A'}\n\n` +
-      `✅ _Ready for you to call and close!_`;
+      `*QUALIFIED LEAD: ${name}*\n` +
+      `Phone: ${phone}\n` +
+      `${contact?.city || ''}${contact?.state ? ', ' + contact.state : ''}\n\n` +
+      `*Qualification Summary:*\n` +
+      `- Coverage: ${flow.data.coverage_type || 'N/A'}\n` +
+      `- Household: ${flow.data.household || 'N/A'}\n` +
+      `- Age(s): ${flow.data.age_range || 'N/A'}\n` +
+      `- Budget: ${flow.data.budget || 'N/A'}\n` +
+      `- Timeline: ${flow.data.timeline || 'N/A'}\n\n` +
+      `_Ready for you to call and close._`;
 
     // Send with approval buttons if possible, otherwise plain text
     const actionId = crypto.randomUUID();
@@ -526,13 +526,13 @@ async function handleQualificationStep(leadId, content, contact) {
           elements: [
             {
               type: 'button',
-              text: { type: 'plain_text', text: '📞 Mark as Called' },
+              text: { type: 'plain_text', text: 'Mark as Called' },
               style: 'primary',
               action_id: `called_${actionId}`,
             },
             {
               type: 'button',
-              text: { type: 'plain_text', text: '⏰ Remind Me Later' },
+              text: { type: 'plain_text', text: 'Remind Me Later' },
               action_id: `remind_${actionId}`,
             },
           ],
@@ -625,32 +625,14 @@ async function handleIncomingMessage(data) {
     console.log(`[Classify] "${content}" → ${classification}`);
 
     switch (classification) {
-      case 'complaint': {
-        await addTagToContact(leadId, CONFIG.notInterestedTagId);
-        await sendSlackNotification(
-          `🏷️ *${name}* — Tagged not interested (complaint)\n💬 "${content}"`
-        );
-        console.log(`[Action] Tagged ${name} not interested (complaint). No reply.`);
-        break;
-      }
-
-      case 'agitated': {
-        await addTagToContact(leadId, CONFIG.notInterestedTagId);
-        await sendSlackNotification(
-          `🏷️ *${name}* — Tagged not interested (agitated, no reply sent)\n💬 "${content}"`
-        );
-        console.log(`[Action] Tagged ${name} not interested (agitated). No reply.`);
-        break;
-      }
-
+      case 'complaint':
+      case 'agitated':
       case 'nice_no': {
-        const closer = getRandomCloser();
-        sendMessage(leadId, closer, contact);
         await addTagToContact(leadId, CONFIG.notInterestedTagId);
         await sendSlackNotification(
-          `✅ *${name}* — Warm closed & tagged\n💬 "${content}"\n📤 "${closer}"`
+          `*${name}* -- Tagged not interested\n"${content}"\n${phone}`
         );
-        console.log(`[Action] Warm closed ${name}.`);
+        console.log(`[Action] Tagged ${name} not interested. No reply.`);
         break;
       }
 
@@ -660,7 +642,7 @@ async function handleIncomingMessage(data) {
         await handleQualificationStep(leadId, null, contact);
 
         await sendSlackNotification(
-          `🚀 *${name}* is interested! Starting qualification flow.\n💬 "${content}"\n📱 ${phone}`
+          `*${name}* is interested -- Starting qualification flow.\n"${content}"\n${phone}`
         );
         console.log(`[Action] Started qualification for ${name}.`);
         break;
@@ -678,7 +660,7 @@ async function handleIncomingMessage(data) {
               type: 'section',
               text: {
                 type: 'mrkdwn',
-                text: `❓ *Question from ${name}*\n📱 ${phone}\n📍 ${contact?.city || ''}${contact?.state ? ', ' + contact.state : ''}\n\n💬 "${content}"\n\n✏️ Draft: _"${draft}"_`,
+                text: `*Question from ${name}*\n${phone}\n${contact?.city || ''}${contact?.state ? ', ' + contact.state : ''}\n\n"${content}"\n\nDraft: _"${draft}"_`,
               },
             },
             {
@@ -686,18 +668,18 @@ async function handleIncomingMessage(data) {
               elements: [
                 {
                   type: 'button',
-                  text: { type: 'plain_text', text: '✅ Send Draft' },
+                  text: { type: 'plain_text', text: 'Send Draft' },
                   style: 'primary',
                   action_id: `approve_${actionId}`,
                 },
                 {
                   type: 'button',
-                  text: { type: 'plain_text', text: '🚀 Start Qualification' },
+                  text: { type: 'plain_text', text: 'Start Qualification' },
                   action_id: `qualify_${actionId}`,
                 },
                 {
                   type: 'button',
-                  text: { type: 'plain_text', text: '❌ Ignore' },
+                  text: { type: 'plain_text', text: 'Ignore' },
                   style: 'danger',
                   action_id: `ignore_${actionId}`,
                 },
@@ -706,7 +688,7 @@ async function handleIncomingMessage(data) {
           ], `Question from ${name}: "${content}"`);
         } else {
           await sendSlackNotification(
-            `❓ *Question from ${name}*\n📱 ${phone}\n💬 "${content}"\n✏️ Draft: "${draft}"\n⚠️ _Needs your approval_`
+            `*Question from ${name}*\n${phone}\n"${content}"\nDraft: "${draft}"\n_Needs your approval_`
           );
         }
         console.log(`[Action] Question from ${name} flagged for approval.`);
@@ -724,7 +706,7 @@ async function handleIncomingMessage(data) {
               type: 'section',
               text: {
                 type: 'mrkdwn',
-                text: `🤔 *Unclear message from ${name}*\n📱 ${phone}\n\n💬 "${content}"\n\n_Couldn't classify — needs your review_`,
+                text: `*Unclear message from ${name}*\n${phone}\n\n"${content}"\n\n_Couldn't classify -- needs your review_`,
               },
             },
             {
@@ -732,18 +714,18 @@ async function handleIncomingMessage(data) {
               elements: [
                 {
                   type: 'button',
-                  text: { type: 'plain_text', text: '🚀 Start Qualification' },
+                  text: { type: 'plain_text', text: 'Start Qualification' },
                   style: 'primary',
                   action_id: `qualify_${actionId}`,
                 },
                 {
                   type: 'button',
-                  text: { type: 'plain_text', text: '🏷️ Not Interested' },
+                  text: { type: 'plain_text', text: 'Not Interested' },
                   action_id: `notinterested_${actionId}`,
                 },
                 {
                   type: 'button',
-                  text: { type: 'plain_text', text: '👀 I\'ll Handle It' },
+                  text: { type: 'plain_text', text: 'I\'ll Handle It' },
                   action_id: `ignore_${actionId}`,
                 },
               ],
@@ -751,7 +733,7 @@ async function handleIncomingMessage(data) {
           ], `Unclear message from ${name}: "${content}"`);
         } else {
           await sendSlackNotification(
-            `🤔 *Unclear message from ${name}*\n📱 ${phone}\n💬 "${content}"\n⚠️ _Needs manual review_`
+            `*Unclear message from ${name}*\n${phone}\n"${content}"\n_Needs manual review_`
           );
         }
         console.log(`[Action] Unclear message from ${name} — flagged for review.`);
@@ -879,7 +861,7 @@ function startHttpServer() {
 
                 // Update Slack message
                 await respondToSlackInteraction(payload.response_url,
-                  `✅ *Approved!* Message sent to ${contact?.firstName || 'lead'}.`
+                  `*Approved* -- Message sent to ${contact?.firstName || 'lead'}.`
                 );
                 break;
               }
@@ -895,7 +877,7 @@ function startHttpServer() {
                 pendingApprovals.delete(actionId);
 
                 await respondToSlackInteraction(payload.response_url,
-                  `🚀 *Qualification started* for ${contact?.firstName || 'lead'}!`
+                  `*Qualification started* for ${contact?.firstName || 'lead'}.`
                 );
                 break;
               }
@@ -907,7 +889,7 @@ function startHttpServer() {
                 pendingApprovals.delete(actionId);
 
                 await respondToSlackInteraction(payload.response_url,
-                  `🏷️ *Tagged not interested* — warm closer sent to ${contact?.firstName || 'lead'}.`
+                  `*Tagged not interested* -- ${contact?.firstName || 'lead'}.`
                 );
                 break;
               }
@@ -915,7 +897,7 @@ function startHttpServer() {
               case 'ignore': {
                 pendingApprovals.delete(actionId);
                 await respondToSlackInteraction(payload.response_url,
-                  `👀 *Got it* — you'll handle ${contact?.firstName || 'this lead'} manually.`
+                  `*Got it* -- you'll handle ${contact?.firstName || 'this lead'} manually.`
                 );
                 break;
               }
@@ -923,7 +905,7 @@ function startHttpServer() {
               case 'called': {
                 pendingApprovals.delete(actionId);
                 await respondToSlackInteraction(payload.response_url,
-                  `📞 *Marked as called!* Nice work.`
+                  `*Marked as called.*`
                 );
                 break;
               }
@@ -932,11 +914,11 @@ function startHttpServer() {
                 // Keep in pending, send reminder in 1 hour
                 setTimeout(async () => {
                   const name = contact?.firstName || 'a lead';
-                  await sendSlackNotification(`⏰ *Reminder* — Don't forget to follow up with *${name}*! 📱 ${contact?.phoneNumber || ''}`);
+                  await sendSlackNotification(`*Reminder* -- Follow up with *${name}*. ${contact?.phoneNumber || ''}`);
                 }, 60 * 60 * 1000);
 
                 await respondToSlackInteraction(payload.response_url,
-                  `⏰ *Reminder set* — I'll ping you in 1 hour about ${contact?.firstName || 'this lead'}.`
+                  `*Reminder set* -- pinging you in 1 hour about ${contact?.firstName || 'this lead'}.`
                 );
                 break;
               }
@@ -967,7 +949,7 @@ function startHttpServer() {
 
         // Test 2: Webhook
         try {
-          await sendSlackNotification('🧪 *Test* — Webhook is working!');
+          await sendSlackNotification('*Test* -- Webhook is working.');
           results.webhook = 'OK';
         } catch (err) {
           results.webhook = `FAILED: ${err.message}`;
@@ -978,13 +960,13 @@ function startHttpServer() {
           await sendSlackBlocks(
             [{
               type: 'section',
-              text: { type: 'mrkdwn', text: '🧪 *Test* — Bot token + interactive buttons working!' },
+              text: { type: 'mrkdwn', text: '*Test* -- Bot token and interactive buttons working.' },
             },
             {
               type: 'actions',
               elements: [{
                 type: 'button',
-                text: { type: 'plain_text', text: '✅ Looks good!' },
+                text: { type: 'plain_text', text: 'Looks good' },
                 action_id: 'test_ok',
                 style: 'primary',
               }],
@@ -1078,7 +1060,7 @@ function connectSocket() {
     const now = Date.now();
     if (now - lastConnectNotify > CONNECTION_NOTIFY_COOLDOWN) {
       lastConnectNotify = now;
-      sendSlackNotification('🟢 *OnlySales Monitor Connected* — Listening 24/7');
+      sendSlackNotification('*OnlySales Monitor Connected* -- Listening 24/7');
     } else {
       console.log('[Socket] Connected (notification suppressed — cooldown active)');
     }
@@ -1094,7 +1076,7 @@ function connectSocket() {
           const now = Date.now();
           if (now - lastDisconnectNotify > CONNECTION_NOTIFY_COOLDOWN) {
             lastDisconnectNotify = now;
-            sendSlackNotification(`🔴 *Monitor Disconnected* — ${reason}. Attempting to reconnect...`);
+            sendSlackNotification(`*Monitor Disconnected* -- ${reason}. Attempting to reconnect...`);
           }
         }, DISCONNECT_DELAY);
       }
@@ -1134,7 +1116,7 @@ function connectSocket() {
 
   socket.on('force-logout', () => {
     console.error('[Socket] Force logout!');
-    sendSlackNotification('🚨 *Force Logout* — Update access token immediately!');
+    sendSlackNotification('*Force Logout* -- Update access token immediately!');
   });
 
   // Heartbeat: only emit ping (version emit was causing server to drop connection)
@@ -1181,7 +1163,7 @@ async function main() {
   // Graceful shutdown
   process.on('SIGINT', () => {
     console.log('\n[Shutdown] Disconnecting...');
-    sendSlackNotification('🔴 *OnlySales Monitor Shutting Down*').finally(() => {
+    sendSlackNotification('*OnlySales Monitor Shutting Down*').finally(() => {
       socket?.disconnect();
       process.exit(0);
     });
