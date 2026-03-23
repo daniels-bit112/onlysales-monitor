@@ -581,6 +581,9 @@ function getRandomCloser() {
 // ============================================================
 async function handleIncomingMessage(data) {
   try {
+    console.log(`[Handler] Data keys: ${Object.keys(data).join(',')}`);
+    console.log(`[Handler] message: "${data.message}", type: "${data.type}", leadId: "${data.leadId}", status: "${data.status}"`);
+
     const messageId = data._id || data.id || `${data.leadId}-${Date.now()}`;
 
     if (processedMessages.has(messageId)) return;
@@ -594,8 +597,9 @@ async function handleIncomingMessage(data) {
 
     const content = data.content || data.message || '';
     const leadId = data.leadId;
-    const type = data.type;
+    const type = data.type || 'inbound'; // incoming-message events are always inbound
 
+    // For incoming-message events, type may not be present — they're always inbound
     if (type !== 'inbound') return;
     if (!content.trim()) return; // Skip empty messages
 
