@@ -608,10 +608,25 @@ async function handleIncomingMessage(data) {
     const leadId = data.leadId;
     const type = data.type || 'inbound'; // incoming-message events are always inbound
 
-    console.log(`[Handler] Data keys: ${Object.keys(data).join(',')}`);
+    // Check if this message was sent BY US (server echoing our own outgoing message)
+    const msgUserId = (typeof msg === 'object' && msg?.userId) || data.userId || '';
+    console.log(`[Handler] Data keys: ${Object.keys(data).join(',')}, userId=${msgUserId}, ourUserId=${CONFIG.userId}`);
     console.log(`[Handler] message type: ${typeof msg}, content resolved: "${content}"`);
     if (typeof msg === 'object' && msg) {
       console.log(`[Handler] message keys: ${Object.keys(msg).join(',')}`);
+    }
+
+    // SKIP messages from our own user — server echoes outbound messages back
+    if (msgUserId && msgUserId === CONFIG.userId) {
+      console.log(`[Handler] SKIPPING — this is our own outgoing message echoed back`);
+      return;
+    }
+
+    // Also skip if we recently sent this exact message (backup dedup)
+    const dedupKey = `${leadId}:${content}`;
+    if (recentSentMessages.has(dedupKey)) {
+      console.log(`[Handler] SKIPPING — matches recently sent outgoing message`);
+      return;
     }
 
     if (type !== 'inbound') return;
