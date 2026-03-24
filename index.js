@@ -654,6 +654,33 @@ async function handleIncomingMessage(data) {
       if (telnyxPhoneId) contact.telnyxPhoneId = telnyxPhoneId;
     }
 
+    // PRE-INITIALIZE the conversation now, so it's ready before any sendMessage call.
+    // This prevents the double-send bug caused by conversationInit + sendMessage in rapid succession.
+    const preInitPhoneId = contact?.phoneProfiles?.[0] || contact?.defaultPhoneNumber || phoneProfileId;
+    if (preInitPhoneId && activeConversationLeadId !== leadId) {
+      try {
+        await new Promise((resolve) => {
+          const timeout = setTimeout(() => {
+            console.log('[PreInit] conversationInit: no ack after 3s');
+            resolve();
+          }, 3000);
+          socket.emit('conversationInit', {
+            leadId,
+            phoneId: preInitPhoneId,
+            isTransferred: false,
+          }, (response) => {
+            clearTimeout(timeout);
+            console.log(`[PreInit] conversationInit ack for lead ${leadId}`);
+            resolve(response);
+          });
+        });
+        activeConversationLeadId = leadId;
+        console.log(`[PreInit] Conversation pre-initialized for lead ${leadId}`);
+      } catch (err) {
+        console.error(`[PreInit] Error: ${err.message}`);
+      }
+    }
+
     // Check if this lead is in a qualification flow
     if (qualificationFlows.has(leadId)) {
       await handleQualificationStep(leadId, content, contact);
@@ -827,44 +854,35 @@ async function sendMessage(leadId, message, contact) {
 
   console.log(`[SendMsg] Sending to lead ${leadId}, phoneId=${phoneId}, msg="${message.substring(0, 50)}..."`);
 
-  // Step 1: Initialize the conversation — NO ack callback (ack causes server-side double-processing)
-  // Instead, wait for the 'conversation-log' event as confirmation
+  // Conversation should already be pre-initialized from handleIncomingMessage.
+  // If not (e.g. after disconnect), init now with ack callback.
   if (activeConversationLeadId !== leadId) {
+    console.log(`[SendMsg] Conversation not pre-initialized, initializing now...`);
     try {
       await new Promise((resolve) => {
         const timeout = setTimeout(() => {
-          console.log('[SendMsg] conversationInit: no conversation-log after 5s, proceeding anyway');
-          socket.off('conversation-log', onConvLog);
+          console.log('[SendMsg] conversationInit: no ack after 3s');
           resolve();
-        }, 5000);
-
-        // Listen for conversation-log event as confirmation that init completed
-        const onConvLog = (data) => {
-          clearTimeout(timeout);
-          socket.off('conversation-log', onConvLog);
-          console.log(`[SendMsg] conversationInit confirmed via conversation-log event`);
-          resolve();
-        };
-        socket.on('conversation-log', onConvLog);
-
-        // Plain emit — NO callback
+        }, 3000);
         socket.emit('conversationInit', {
           leadId,
           phoneId,
           isTransferred: false,
+        }, (response) => {
+          clearTimeout(timeout);
+          console.log(`[SendMsg] conversationInit ack for lead ${leadId}`);
+          resolve(response);
         });
-        console.log(`[SendMsg] conversationInit emitted (no ack) for lead ${leadId}`);
       });
       activeConversationLeadId = leadId;
-      console.log(`[SendMsg] Conversation initialized for lead ${leadId}`);
     } catch (err) {
       console.error(`[SendMsg] conversationInit error: ${err.message}`);
     }
   } else {
-    console.log(`[SendMsg] Conversation already active for lead ${leadId}, skipping init`);
+    console.log(`[SendMsg] Conversation already active for lead ${leadId}`);
   }
 
-  // Step 2: Send the message — plain emit
+  // Send the message — plain emit
   socket.emit('sendMessage', {
     message,
     scheduledAt: null,
@@ -991,6 +1009,30 @@ function startHttpServer() {
             }
 
             const { leadId, draft, contact } = pending;
+
+            // PRE-INITIALIZE conversation before any sendMessage calls
+            // This separates init from send to prevent the double-send bug
+            const btnPhoneId = contact?.phoneProfiles?.[0] || contact?.defaultPhoneNumber;
+            if (btnPhoneId && activeConversationLeadId !== leadId) {
+              try {
+                await new Promise((resolve) => {
+                  const timeout = setTimeout(resolve, 3000);
+                  socket.emit('conversationInit', {
+                    leadId,
+                    phoneId: btnPhoneId,
+                    isTransferred: false,
+                  }, (response) => {
+                    clearTimeout(timeout);
+                    console.log(`[Slack] Pre-init ack for lead ${leadId}`);
+                    resolve(response);
+                  });
+                });
+                activeConversationLeadId = leadId;
+                console.log(`[Slack] Conversation pre-initialized for lead ${leadId}`);
+              } catch (err) {
+                console.error(`[Slack] Pre-init error: ${err.message}`);
+              }
+            }
 
             switch (actionType) {
               case 'approve': {
