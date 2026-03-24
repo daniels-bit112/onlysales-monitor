@@ -69,6 +69,10 @@ let activeConversationLeadId = null;
 // Dedup outgoing messages: "leadId:messageHash" -> timestamp
 const recentSentMessages = new Map();
 
+// Track leads with conversations already in progress: leadId -> timestamp
+// Prevents re-triggering the bot when a lead sends multiple messages rapidly
+const activeLeadConversations = new Map();
+
 // Connection notification cooldown (prevents spam on flaky connections)
 let lastConnectNotify = 0;
 let lastDisconnectNotify = 0;
@@ -687,6 +691,37 @@ async function handleIncomingMessage(data) {
       return;
     }
 
+    // GUARD: Check if this lead already has a conversation in progress
+    // (pending Slack approval, or was recently handled). Prevents re-triggering
+    // the bot when a lead sends multiple messages like "Help", "Hello", "Yes help"
+    const hasPendingApproval = [...pendingApprovals.values()].some(p => p.leadId === leadId);
+    const lastHandled = activeLeadConversations.get(leadId);
+    const conversationCooldown = 5 * 60 * 1000; // 5 minutes
+
+    if (hasPendingApproval) {
+      console.log(`[Guard] Lead ${leadId} already has a pending Slack approval — skipping new message "${content}"`);
+      // Optionally notify Slack that the lead sent another message
+      await sendSlackNotification(`_${name} sent another message:_ "${content}"`);
+      return;
+    }
+
+    if (lastHandled && Date.now() - lastHandled < conversationCooldown) {
+      console.log(`[Guard] Lead ${leadId} was recently handled (${Math.round((Date.now() - lastHandled) / 1000)}s ago) — skipping`);
+      await sendSlackNotification(`_${name} sent another message:_ "${content}"`);
+      return;
+    }
+
+    // Mark this lead as being handled
+    activeLeadConversations.set(leadId, Date.now());
+
+    // Clean old entries periodically
+    if (activeLeadConversations.size > 500) {
+      const now = Date.now();
+      for (const [id, ts] of activeLeadConversations) {
+        if (now - ts > conversationCooldown) activeLeadConversations.delete(id);
+      }
+    }
+
     // Classify the message
     const classification = classifyMessage(content);
     console.log(`[Classify] "${content}" → ${classification}`);
@@ -1275,14 +1310,8 @@ function connectSocket() {
       console.log('[Socket] Reconnected before disconnect notification was sent — suppressed');
     }
 
-    // Only send connect notification if enough time has passed
-    const now = Date.now();
-    if (now - lastConnectNotify > CONNECTION_NOTIFY_COOLDOWN) {
-      lastConnectNotify = now;
-      sendSlackNotification('*OnlySales Monitor Connected* -- Listening 24/7');
-    } else {
-      console.log('[Socket] Connected (notification suppressed — cooldown active)');
-    }
+    // Only log connects — no Slack notification (too noisy with frequent reconnects/deploys)
+    console.log('[Socket] Connected — listening for messages');
   });
 
   socket.on('disconnect', (reason) => {
