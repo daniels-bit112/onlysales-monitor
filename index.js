@@ -882,14 +882,15 @@ async function sendMessage(leadId, message, contact) {
     console.log(`[SendMsg] Conversation already active for lead ${leadId}`);
   }
 
-  // Send the message — plain emit
-  socket.emit('sendMessage', {
+  // Send the message — volatile emit (prevents socket.io from buffering this packet,
+  // so if the transport disconnects right after, the packet is NOT replayed on reconnect)
+  socket.volatile.emit('sendMessage', {
     message,
     scheduledAt: null,
     images: [],
   });
 
-  console.log(`[SendMsg] sendMessage emitted for lead ${leadId}`);
+  console.log(`[SendMsg] sendMessage emitted (volatile) for lead ${leadId}`);
 }
 
 // ============================================================
