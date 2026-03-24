@@ -4,7 +4,7 @@
  * Features:
  *   - Socket.io connection to OnlySales CRM
  *   - Smart message classification (English + Spanish, edge cases)
- *   - 5-step lead qualification flow for interested leads
+ *   - Lead qualification flow with dynamic family plan deviation
  *   - Slack interactive approvals (approve/edit/reject via buttons)
  *   - Auto warm-close for not-interested leads
  *   - HTTP server for Slack interaction payloads
@@ -40,6 +40,7 @@ const CONFIG = {
 
   // Tag IDs
   notInterestedTagId: '66f7051ab1a7024acc4477b9',
+  interestedTagId: process.env.ONLYSALES_INTERESTED_TAG_ID || '',  // Set this to your "Interested" / "Positive" tag ID
 
   // Server
   port: process.env.PORT || 3000,
@@ -262,6 +263,30 @@ async function addTagToContact(contactId, tagId) {
   }
 }
 
+async function fetchAndSetInterestedTag() {
+  try {
+    const result = await apiRequest('GET', '/tag');
+    if (result.status === 200) {
+      const tags = Array.isArray(result.data) ? result.data : (result.data?.data || []);
+      console.log(`[Tags] Found ${tags.length} tags`);
+      for (const t of tags) {
+        const name = (t.name || t.title || '').toLowerCase();
+        const id = t._id || t.id;
+        console.log(`  ${t.name || t.title}  →  ${id}`);
+        if (name === 'positive') {
+          CONFIG.interestedTagId = id;
+          console.log(`[Tags] Found "positive" tag → ${id}`);
+        }
+      }
+      if (!CONFIG.interestedTagId) {
+        console.log('[Tags] WARNING: No tag named "positive" found. Positive leads will not be tagged.');
+      }
+    }
+  } catch (err) {
+    console.error('[Tags] Error fetching tags:', err.message);
+  }
+}
+
 // ============================================================
 // MESSAGE CLASSIFICATION v2 (English + Spanish + edge cases)
 // ============================================================
@@ -366,67 +391,72 @@ function classifyMessage(content) {
 }
 
 // ============================================================
-// 5-STEP LEAD QUALIFICATION FLOW
+// 4-STEP LEAD QUALIFICATION FLOW
 // ============================================================
+// Base qualification steps (family_dob step gets inserted dynamically if needed)
 const QUALIFICATION_STEPS = [
   {
-    id: 'coverage_type',
-    question: "Are you looking for health, dental, vision, or all of the above?",
+    id: 'coverage_for',
+    question: "Is this coverage just for you, or are you looking for a plan that covers anyone else too? (spouse, kids, family, etc.)",
     parse: (msg) => {
       const lower = msg.toLowerCase();
-      const types = [];
-      if (lower.includes('health') || lower.includes('salud')) types.push('Health');
-      if (lower.includes('dental')) types.push('Dental');
-      if (lower.includes('vision') || lower.includes('eye') || lower.includes('vista')) types.push('Vision');
-      if (lower.includes('all') || lower.includes('everything') || lower.includes('todo') || lower.includes('todos')) {
-        return { value: 'Health, Dental, Vision', valid: true };
-      }
-      if (types.length > 0) return { value: types.join(', '), valid: true };
-      // Accept any response as valid since they might describe it differently
+      const familyKeywords = ['family', 'spouse', 'wife', 'husband', 'kid', 'kids', 'child', 'children',
+        'son', 'daughter', 'dependent', 'dependents', 'partner', 'both', 'us', 'we',
+        'two', 'three', 'four', '2', '3', '4', 'couple', 'married', 'plus'];
+      const justMeKeywords = ['just me', 'only me', 'myself', 'just myself', 'solo', 'individual', 'one', '1', 'no'];
+      const isFamily = familyKeywords.some(kw => lower.includes(kw));
+      const isJustMe = justMeKeywords.some(kw => lower.includes(kw));
+      // If they mention family keywords (even with some "no" mixed in), treat as family
+      if (isFamily && !isJustMe) return { value: msg.trim(), valid: true, needsFamilyDob: true };
+      if (isJustMe && !isFamily) return { value: 'Just me', valid: true, needsFamilyDob: false };
+      // Ambiguous — default to checking; if they mention any family keyword, ask for DOB
+      if (isFamily) return { value: msg.trim(), valid: true, needsFamilyDob: true };
+      return { value: msg.trim(), valid: true, needsFamilyDob: false };
+    },
+  },
+  {
+    id: 'preexisting',
+    question: "Do you have any pre-existing conditions or are you currently taking any medications? I want to make sure everything is covered for you.",
+    parse: (msg) => {
       return { value: msg.trim(), valid: true };
     },
   },
   {
-    id: 'household',
-    question: "Is this for just yourself or are you looking to cover family members too?",
+    id: 'providers',
+    question: "Do you have any doctors, clinics, hospitals, or specialists you'd like to keep seeing? I'll check which plans they accept.",
+    parse: (msg) => {
+      return { value: msg.trim(), valid: true };
+    },
+  },
+  {
+    id: 'tax_status',
+    question: "What's your tax filing status? (Single, Head of Household, Married Filing Jointly, or are you claiming any dependents?)",
     parse: (msg) => {
       const lower = msg.toLowerCase();
-      if (lower.includes('just me') || lower.includes('myself') || lower.includes('solo') ||
-          lower.includes('individual') || lower.includes('single') || lower === 'me') {
-        return { value: 'Individual', valid: true };
-      }
-      if (lower.includes('family') || lower.includes('wife') || lower.includes('husband') ||
-          lower.includes('kid') || lower.includes('child') || lower.includes('spouse') ||
-          lower.includes('familia') || lower.includes('esposa') || lower.includes('hijo')) {
-        return { value: 'Family', valid: true };
-      }
+      if (lower.includes('single')) return { value: 'Single', valid: true };
+      if (lower.includes('head') || lower.includes('hoh')) return { value: 'Head of Household', valid: true };
+      if (lower.includes('joint') || lower.includes('married')) return { value: 'Married Filing Jointly', valid: true };
+      if (lower.includes('dependent')) return { value: msg.trim() + ' (claiming dependents)', valid: true };
       return { value: msg.trim(), valid: true };
     },
   },
   {
-    id: 'age_range',
-    question: "And how old are you? (If family, what are the ages of everyone who needs coverage?)",
-    parse: (msg) => {
-      // Accept anything with a number
-      if (/\d/.test(msg)) return { value: msg.trim(), valid: true };
-      return { value: msg.trim(), valid: true };
-    },
-  },
-  {
-    id: 'budget',
-    question: "Do you have a monthly budget in mind, or would you like me to show you a range of options?",
-    parse: (msg) => {
-      return { value: msg.trim(), valid: true };
-    },
-  },
-  {
-    id: 'timeline',
-    question: "When are you looking to get started? ASAP or a specific date?",
+    id: 'income',
+    question: "And what's your estimated household income for this year? Just a rough number is fine — it helps me find plans you may qualify for.",
     parse: (msg) => {
       return { value: msg.trim(), valid: true };
     },
   },
 ];
+
+// The family DOB step that gets dynamically inserted after coverage_for when needed
+const FAMILY_DOB_STEP = {
+  id: 'family_dob',
+  question: "Got it! I'll need the date of birth for each additional person you'd like covered. Can you list them for me? (e.g. 03/15/1990, 06/22/2015)",
+  parse: (msg) => {
+    return { value: msg.trim(), valid: true };
+  },
+};
 
 function getQualificationFlow(leadId) {
   return qualificationFlows.get(leadId) || null;
@@ -436,6 +466,7 @@ function startQualificationFlow(leadId, contact) {
   const flow = {
     step: 0,
     data: {},
+    steps: [...QUALIFICATION_STEPS], // Copy so we can insert family_dob dynamically per lead
     contact,
     leadId,
     lastActivity: Date.now(),
@@ -452,13 +483,13 @@ async function handleQualificationStep(leadId, content, contact) {
     flow = startQualificationFlow(leadId, contact);
 
     // Send first question
-    const firstStep = QUALIFICATION_STEPS[0];
+    const firstStep = flow.steps[0];
     await sendMessage(leadId, firstStep.question, contact);
     console.log(`[Qualify] Started flow for ${leadId}, step 0: ${firstStep.id}`);
 
     await sendSlackNotification(
       `*Started qualification flow* for lead ${contact?.firstName || 'Unknown'}\n` +
-      `Step 1/${QUALIFICATION_STEPS.length}: ${firstStep.id}`
+      `Step 1/${flow.steps.length}: ${firstStep.id}`
     );
     return;
   }
@@ -470,36 +501,34 @@ async function handleQualificationStep(leadId, content, contact) {
     qualificationFlows.delete(leadId);
     console.log(`[Qualify] Lead ${leadId} opted out during qualification (${midFlowClassification})`);
 
-    if (midFlowClassification === 'nice_no') {
-      const closer = getRandomCloser();
-      await sendMessage(leadId, closer, contact);
-      await addTagToContact(leadId, CONFIG.notInterestedTagId);
-      await sendSlackNotification(
-        `↩️ *${contact?.firstName || 'Unknown'}* opted out during qualification — warm closed & tagged`
-      );
-    } else {
-      await addTagToContact(leadId, CONFIG.notInterestedTagId);
-      await sendSlackNotification(
-        `↩️ *${contact?.firstName || 'Unknown'}* opted out during qualification (${midFlowClassification}) — tagged, no reply`
-      );
-    }
+    await addTagToContact(leadId, CONFIG.notInterestedTagId);
+    await sendSlackNotification(
+      `↩️ *${contact?.firstName || 'Unknown'}* opted out during qualification (${midFlowClassification}) — tagged, no reply`
+    );
     return;
   }
 
   // Parse current step answer
-  const currentStep = QUALIFICATION_STEPS[flow.step];
+  const currentStep = flow.steps[flow.step];
   const parsed = currentStep.parse(content);
   flow.data[currentStep.id] = parsed.value;
   flow.lastActivity = Date.now();
 
   console.log(`[Qualify] Lead ${leadId} step ${flow.step} (${currentStep.id}): "${parsed.value}"`);
 
+  // If they just answered coverage_for and need family coverage, insert family_dob step next
+  if (currentStep.id === 'coverage_for' && parsed.needsFamilyDob) {
+    // Insert FAMILY_DOB_STEP right after coverage_for (at position flow.step + 1)
+    flow.steps.splice(flow.step + 1, 0, FAMILY_DOB_STEP);
+    console.log(`[Qualify] Family plan detected — inserted family_dob step for lead ${leadId}`);
+  }
+
   // Move to next step
   flow.step++;
 
-  if (flow.step < QUALIFICATION_STEPS.length) {
+  if (flow.step < flow.steps.length) {
     // Send next question
-    const nextStep = QUALIFICATION_STEPS[flow.step];
+    const nextStep = flow.steps[flow.step];
     await sendMessage(leadId, nextStep.question, contact);
     console.log(`[Qualify] Next step ${flow.step}: ${nextStep.id}`);
   } else {
@@ -510,16 +539,22 @@ async function handleQualificationStep(leadId, content, contact) {
     const phone = contact?.phoneNumber || 'unknown';
     const phoneProfileId = contact?.phoneProfiles?.[0] || contact?.defaultPhoneNumber || '';
 
+    // Build family DOB line only if they have a family plan
+    const familyDobLine = flow.data.family_dob
+      ? `- Other Person(s) DOB: ${flow.data.family_dob}\n`
+      : '';
+
     const summary =
       `*QUALIFIED LEAD: ${name}*\n` +
       `Phone: ${phone}\n` +
       `${contact?.city || ''}${contact?.state ? ', ' + contact.state : ''}\n\n` +
       `*Qualification Summary:*\n` +
-      `- Coverage: ${flow.data.coverage_type || 'N/A'}\n` +
-      `- Household: ${flow.data.household || 'N/A'}\n` +
-      `- Age(s): ${flow.data.age_range || 'N/A'}\n` +
-      `- Budget: ${flow.data.budget || 'N/A'}\n` +
-      `- Timeline: ${flow.data.timeline || 'N/A'}\n\n` +
+      `- Coverage For: ${flow.data.coverage_for || 'N/A'}\n` +
+      familyDobLine +
+      `- Pre-existing / Medications: ${flow.data.preexisting || 'N/A'}\n` +
+      `- Providers (doctors/clinics/hospitals): ${flow.data.providers || 'N/A'}\n` +
+      `- Tax Filing Status: ${flow.data.tax_status || 'N/A'}\n` +
+      `- Estimated Household Income: ${flow.data.income || 'N/A'}\n\n` +
       `_Ready for you to call and close._`;
 
     // Send with approval buttons if possible, otherwise plain text
@@ -722,80 +757,29 @@ async function handleIncomingMessage(data) {
       case 'complaint':
       case 'agitated':
       case 'nice_no': {
+        // Autonomous: tag not interested, no reply, move on
         await addTagToContact(leadId, CONFIG.notInterestedTagId);
         await sendSlackNotification(
-          `*${name}* -- Tagged not interested\n"${content}"\n${phone}`
+          `*${name}* -- Not interested (${classification}). Tagged & moved on.\n"${content}"\n${phone}`
         );
-        console.log(`[Action] Tagged ${name} not interested. No reply.`);
+        console.log(`[Action] Tagged ${name} not interested (${classification}). No reply.`);
         break;
       }
 
-      case 'interested': {
-        // Start the qualification flow
-        await sendMessage(leadId, "Hey! Thanks for reaching out. I'd love to help you find the right coverage. Let me ask a few quick questions so I can match you with the best options.", contact);
-        await handleQualificationStep(leadId, null, contact);
-
-        await sendSlackNotification(
-          `*${name}* is interested -- Starting qualification flow.\n"${content}"\n${phone}`
-        );
-        console.log(`[Action] Started qualification for ${name}.`);
-        break;
-      }
-
-      case 'question': {
-        // Someone asking a question — likely interested, flag for approval
-        const draft = generateDraft(content, contact);
-        const actionId = crypto.randomUUID();
-        pendingApprovals.set(actionId, { leadId, draft, contact });
-
-        if (CONFIG.slackBotToken && CONFIG.slackChannelId) {
-          await sendSlackBlocks([
-            {
-              type: 'section',
-              text: {
-                type: 'mrkdwn',
-                text: `*Question from ${name}*\n${phone}\n${contact?.city || ''}${contact?.state ? ', ' + contact.state : ''}\n\n"${content}"\n\nDraft: _"${draft}"_`,
-              },
-            },
-            {
-              type: 'actions',
-              elements: [
-                {
-                  type: 'button',
-                  text: { type: 'plain_text', text: 'Send Draft' },
-                  style: 'primary',
-                  action_id: `approve_${actionId}`,
-                  value: JSON.stringify({ leadId, name, phone, phoneProfileId, draft }),
-                },
-                {
-                  type: 'button',
-                  text: { type: 'plain_text', text: 'Start Qualification' },
-                  action_id: `qualify_${actionId}`,
-                  value: JSON.stringify({ leadId, name, phone, phoneProfileId }),
-                },
-                {
-                  type: 'button',
-                  text: { type: 'plain_text', text: 'Ignore' },
-                  style: 'danger',
-                  action_id: `ignore_${actionId}`,
-                  value: JSON.stringify({ leadId, name, phoneProfileId }),
-                },
-              ],
-            },
-          ], `Question from ${name}: "${content}"`);
-        } else {
-          await sendSlackNotification(
-            `*Question from ${name}*\n${phone}\n"${content}"\nDraft: "${draft}"\n_Needs your approval_`
-          );
-        }
-        console.log(`[Action] Question from ${name} flagged for approval.`);
-        break;
-      }
-
+      case 'interested':
+      case 'question':
       case 'unclear': {
-        // Can't classify — flag for manual review
-        const actionId = crypto.randomUUID();
-        pendingApprovals.set(actionId, { leadId, contact, content });
+        // Positive lead — tag as interested and send to Slack for approval
+        if (CONFIG.interestedTagId) {
+          await addTagToContact(leadId, CONFIG.interestedTagId);
+        }
+
+        const posActionId = crypto.randomUUID();
+        pendingApprovals.set(posActionId, { leadId, contact, content });
+
+        const classLabel = classification === 'interested' ? 'Interested'
+          : classification === 'question' ? 'Question'
+          : 'Unclear';
 
         if (CONFIG.slackBotToken && CONFIG.slackChannelId) {
           await sendSlackBlocks([
@@ -803,7 +787,7 @@ async function handleIncomingMessage(data) {
               type: 'section',
               text: {
                 type: 'mrkdwn',
-                text: `*Unclear message from ${name}*\n${phone}\n\n"${content}"\n\n_Couldn't classify -- needs your review_`,
+                text: `*${classLabel} lead: ${name}*\n${phone}\n${contact?.city || ''}${contact?.state ? ', ' + contact.state : ''}\n\n"${content}"\n\n_Tagged positive. Approve to start qualification._`,
               },
             },
             {
@@ -813,30 +797,30 @@ async function handleIncomingMessage(data) {
                   type: 'button',
                   text: { type: 'plain_text', text: 'Start Qualification' },
                   style: 'primary',
-                  action_id: `qualify_${actionId}`,
+                  action_id: `qualify_${posActionId}`,
                   value: JSON.stringify({ leadId, name, phone, phoneProfileId }),
                 },
                 {
                   type: 'button',
                   text: { type: 'plain_text', text: 'Not Interested' },
-                  action_id: `notinterested_${actionId}`,
+                  action_id: `notinterested_${posActionId}`,
                   value: JSON.stringify({ leadId, name, phoneProfileId }),
                 },
                 {
                   type: 'button',
-                  text: { type: 'plain_text', text: 'I\'ll Handle It' },
-                  action_id: `ignore_${actionId}`,
+                  text: { type: 'plain_text', text: "I'll Handle It" },
+                  action_id: `ignore_${posActionId}`,
                   value: JSON.stringify({ leadId, name, phoneProfileId }),
                 },
               ],
             },
-          ], `Unclear message from ${name}: "${content}"`);
+          ], `${classLabel} lead: ${name} — "${content}"`);
         } else {
           await sendSlackNotification(
-            `*Unclear message from ${name}*\n${phone}\n"${content}"\n_Needs manual review_`
+            `*${classLabel} lead: ${name}*\n${phone}\n"${content}"\n_Tagged positive — needs your approval to qualify_`
           );
         }
-        console.log(`[Action] Unclear message from ${name} — flagged for review.`);
+        console.log(`[Action] ${classLabel} lead ${name} — tagged positive, awaiting Slack approval.`);
         break;
       }
     }
@@ -1084,11 +1068,9 @@ function startHttpServer() {
 
               case 'qualify': {
                 // Start qualification flow for this lead
-                const firstStep = QUALIFICATION_STEPS[0];
-                await sendMessage(leadId, "Hey! I'd love to help you find the right coverage. Let me ask a few quick questions.", contact);
-
-                const flow = startQualificationFlow(leadId, contact);
-                await sendMessage(leadId, firstStep.question, contact);
+                const qFlow = startQualificationFlow(leadId, contact);
+                const qFirstStep = qFlow.steps[0];
+                await sendMessage(leadId, `Hey! I'd love to help you find the best coverage. I just need to ask a few quick questions.\n\n${qFirstStep.question}`, contact);
 
                 pendingApprovals.delete(actionId);
 
@@ -1393,6 +1375,9 @@ async function main() {
     console.error('ERROR: SLACK_WEBHOOK_URL is required');
     process.exit(1);
   }
+
+  // Auto-detect the "Positive" / "Interested" tag ID from OnlySales
+  await fetchAndSetInterestedTag();
 
   // Start HTTP server (for health checks + Slack interactions)
   startHttpServer();
