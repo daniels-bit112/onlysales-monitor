@@ -478,14 +478,43 @@ const QUALIFICATION_STEPS = [
     id: 'preexisting',
     question: "Do you have any pre-existing conditions or take any medications? Just want to make sure everything gets covered.",
     parse: (msg) => {
-      return { value: msg.trim(), valid: true };
+      const lower = msg.toLowerCase().trim();
+      // Clear "no" answers — no follow-up needed
+      const noKeywords = ['no', 'nope', 'nah', 'none', 'nothing', 'n/a', 'na', 'healthy',
+        'no conditions', 'no meds', 'no medications', 'don\'t take', 'dont take', 'not taking'];
+      if (noKeywords.some(kw => lower === kw || lower.includes(kw))) {
+        return { value: 'None', valid: true, needsFollowUp: false };
+      }
+      // Vague "yes" without specifics — need to follow up
+      const vagueYes = ['yes', 'yeah', 'yep', 'yup', 'i do', 'i am', 'y', 'si', 'sí',
+        'some', 'a few', 'couple', 'yes i do', 'yeah i do'];
+      const hasSpecifics = /diabetes|diabetic|asthma|blood pressure|hypertension|heart|cancer|arthritis|cholesterol|thyroid|copd|seizure|epilepsy|depression|anxiety|bipolar|insulin|metformin|lisinopril|amlodipine|atorvastatin|omeprazole|losartan|gabapentin|sertraline|xanax|adderall|lexapro|zoloft|prozac|wellbutrin|prescription|mg\b/i.test(msg);
+      if (!hasSpecifics && vagueYes.some(kw => lower === kw || lower.startsWith(kw + ' '))) {
+        return { value: msg.trim(), valid: true, needsFollowUp: 'preexisting_details' };
+      }
+      // They gave specifics — good to go
+      return { value: msg.trim(), valid: true, needsFollowUp: false };
     },
   },
   {
     id: 'providers',
     question: "Any doctors, specialists, or hospitals you'd want to keep seeing? I'll make sure they're in-network.",
     parse: (msg) => {
-      return { value: msg.trim(), valid: true };
+      const lower = msg.toLowerCase().trim();
+      // Clear "no" answers
+      const noKeywords = ['no', 'nope', 'nah', 'none', 'nothing', 'n/a', 'na', 'not really',
+        'don\'t have', 'dont have', 'no doctor', 'no one', 'nobody'];
+      if (noKeywords.some(kw => lower === kw || lower.includes(kw))) {
+        return { value: 'None', valid: true, needsFollowUp: false };
+      }
+      // Vague "yes" without names — need to follow up
+      const vagueYes = ['yes', 'yeah', 'yep', 'yup', 'i do', 'y', 'si', 'sí',
+        'some', 'a few', 'couple', 'yes i do', 'yeah i do'];
+      const hasNames = /dr\.?\s|doctor\s\w|hospital|clinic|medical center|kaiser|mayo|cedars|mount sinai|cleveland|memorial|regional|methodist|baptist|presbyterian|st\.?\s/i.test(msg);
+      if (!hasNames && vagueYes.some(kw => lower === kw || lower.startsWith(kw + ' '))) {
+        return { value: msg.trim(), valid: true, needsFollowUp: 'providers_details' };
+      }
+      return { value: msg.trim(), valid: true, needsFollowUp: false };
     },
   },
   {
@@ -509,13 +538,23 @@ const QUALIFICATION_STEPS = [
   },
 ];
 
-// The family DOB step that gets dynamically inserted after coverage_for when needed
+// Dynamic follow-up steps that get inserted when the lead gives a vague answer
 const FAMILY_DOB_STEP = {
   id: 'family_dob',
   question: "No problem! I'll need the date of birth for each person you want covered. Can you list them out for me?",
-  parse: (msg) => {
-    return { value: msg.trim(), valid: true };
-  },
+  parse: (msg) => { return { value: msg.trim(), valid: true }; },
+};
+
+const PREEXISTING_DETAILS_STEP = {
+  id: 'preexisting_details',
+  question: "Which conditions or medications specifically? I need the names so I can make sure they're covered under the plan.",
+  parse: (msg) => { return { value: msg.trim(), valid: true }; },
+};
+
+const PROVIDERS_DETAILS_STEP = {
+  id: 'providers_details',
+  question: "What are the names of the doctors, clinics, or hospitals? That way I can check which plans they accept.",
+  parse: (msg) => { return { value: msg.trim(), valid: true }; },
 };
 
 function getQualificationFlow(leadId) {
@@ -613,10 +652,18 @@ async function handleQualificationStep(leadId, content, contact) {
 
   console.log(`[Qualify] Lead ${leadId} step ${flow.step} (${currentStep.id}): "${parsed.value}"`);
 
-  // If they just answered coverage_for and need family coverage, insert family_dob step next
+  // Dynamic follow-up insertions based on vague answers
   if (currentStep.id === 'coverage_for' && parsed.needsFamilyDob) {
     flow.steps.splice(flow.step + 1, 0, FAMILY_DOB_STEP);
-    console.log(`[Qualify] Family plan detected — inserted family_dob step for lead ${leadId}`);
+    console.log(`[Qualify] Family plan detected — inserted family_dob step`);
+  }
+  if (parsed.needsFollowUp === 'preexisting_details') {
+    flow.steps.splice(flow.step + 1, 0, PREEXISTING_DETAILS_STEP);
+    console.log(`[Qualify] Vague preexisting answer — inserted follow-up for specifics`);
+  }
+  if (parsed.needsFollowUp === 'providers_details') {
+    flow.steps.splice(flow.step + 1, 0, PROVIDERS_DETAILS_STEP);
+    console.log(`[Qualify] Vague providers answer — inserted follow-up for names`);
   }
 
   // Forward-scan: check if their reply also answers upcoming steps
@@ -665,8 +712,8 @@ async function handleQualificationStep(leadId, content, contact) {
       `*Qualification Summary:*\n` +
       `- Coverage For: ${flow.data.coverage_for || 'N/A'}\n` +
       familyDobLine +
-      `- Pre-existing / Medications: ${flow.data.preexisting || 'N/A'}\n` +
-      `- Providers (doctors/clinics/hospitals): ${flow.data.providers || 'N/A'}\n` +
+      `- Pre-existing / Medications: ${flow.data.preexisting_details || flow.data.preexisting || 'N/A'}\n` +
+      `- Providers (doctors/clinics/hospitals): ${flow.data.providers_details || flow.data.providers || 'N/A'}\n` +
       `- Tax Filing Status: ${flow.data.tax_status || 'N/A'}\n` +
       `- Estimated Household Income: ${flow.data.income || 'N/A'}\n\n` +
       `_Ready for you to call and close._`;
