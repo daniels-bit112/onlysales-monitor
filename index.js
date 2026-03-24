@@ -579,16 +579,27 @@ async function handleQualificationStep(leadId, content, contact) {
     return;
   }
 
-  // Check for bail-out mid-flow
-  const midFlowClassification = classifyMessage(content);
-  if (['agitated', 'complaint', 'nice_no'].includes(midFlowClassification)) {
-    // They want out — respect it
+  // Check for bail-out mid-flow — BUT only on EXPLICIT opt-outs.
+  // Simple "no", "nope", "nah" etc. are valid answers to yes/no qualification questions
+  // (e.g., "Do you have pre-existing conditions?" → "Nope" means no conditions, NOT "I'm not interested")
+  const lower = content.toLowerCase().trim();
+  const explicitOptOut = [
+    'not interested', 'no thanks', 'no thank you', 'stop', 'unsubscribe', 'opt out',
+    'leave me alone', 'stop texting', 'stop calling', 'remove me', 'take me off',
+    'don\'t need', 'dont need', 'do not need', 'not looking', 'already have',
+    'already covered', 'have insurance', 'have coverage', 'i\'m good on insurance',
+    'no me interesa', 'no necesito', 'dejame en paz',
+  ];
+  const isAgitated = classifyMessage(content) === 'agitated'; // vulgar/hostile always bail
+  const isExplicitNo = explicitOptOut.some(p => lower.includes(p));
+
+  if (isAgitated || isExplicitNo) {
     qualificationFlows.delete(leadId);
-    console.log(`[Qualify] Lead ${leadId} opted out during qualification (${midFlowClassification})`);
+    console.log(`[Qualify] Lead ${leadId} explicitly opted out during qualification`);
 
     await addTagToContact(leadId, CONFIG.notInterestedTagId);
     await sendSlackNotification(
-      `↩️ *${contact?.firstName || 'Unknown'}* opted out during qualification (${midFlowClassification}) — tagged, no reply`
+      `↩️ *${contact?.firstName || 'Unknown'}* opted out during qualification — tagged, no reply`
     );
     return;
   }
