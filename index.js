@@ -670,22 +670,26 @@ async function handleIncomingMessage(data) {
     // This MUST happen before any async work (API calls, socket emits, etc.)
     // When a lead sends "Help" then "Hello" quickly, both events fire simultaneously.
     // Without this lock, both would pass the guard and trigger duplicate sequences.
-    if (activeLeadConversations.has(leadId)) {
-      const elapsed = Date.now() - activeLeadConversations.get(leadId);
-      if (elapsed < 5 * 60 * 1000) { // 5-minute cooldown
-        console.log(`[Guard] Lead ${leadId} already being handled (${Math.round(elapsed / 1000)}s ago) — skipping "${content}"`);
+    // BUT: always let messages through if lead is in a qualification flow (they're answering questions)
+    const inQualFlow = qualificationFlows.has(leadId);
+
+    if (!inQualFlow) {
+      if (activeLeadConversations.has(leadId)) {
+        const elapsed = Date.now() - activeLeadConversations.get(leadId);
+        if (elapsed < 5 * 60 * 1000) { // 5-minute cooldown
+          console.log(`[Guard] Lead ${leadId} already being handled (${Math.round(elapsed / 1000)}s ago) — skipping "${content}"`);
+          return;
+        }
+      }
+
+      // Also check if this lead already has a pending Slack approval
+      const hasPending = [...pendingApprovals.values()].some(p => p.leadId === leadId);
+      if (hasPending) {
+        console.log(`[Guard] Lead ${leadId} has pending Slack approval — skipping "${content}"`);
         return;
       }
     }
 
-    // Also check if this lead already has a pending Slack approval
-    const hasPending = [...pendingApprovals.values()].some(p => p.leadId === leadId);
-    if (hasPending) {
-      console.log(`[Guard] Lead ${leadId} has pending Slack approval — skipping "${content}"`);
-      return;
-    }
-
-    // Also check if lead is in qualification flow (handled separately below, but block here too)
     // Set the lock IMMEDIATELY (synchronous) before any async work
     activeLeadConversations.set(leadId, Date.now());
 
