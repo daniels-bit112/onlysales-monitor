@@ -769,17 +769,14 @@ async function handleIncomingMessage(data) {
       case 'interested':
       case 'question':
       case 'unclear': {
-        // Positive lead — tag as interested and send to Slack for approval
+        // Positive lead — tag positive, draft a response, send to Slack for approval
         if (CONFIG.interestedTagId) {
           await addTagToContact(leadId, CONFIG.interestedTagId);
         }
 
+        const draft = generateDraft(content, contact);
         const posActionId = crypto.randomUUID();
-        pendingApprovals.set(posActionId, { leadId, contact, content });
-
-        const classLabel = classification === 'interested' ? 'Interested'
-          : classification === 'question' ? 'Question'
-          : 'Unclear';
+        pendingApprovals.set(posActionId, { leadId, draft, contact, content });
 
         if (CONFIG.slackBotToken && CONFIG.slackChannelId) {
           await sendSlackBlocks([
@@ -787,7 +784,7 @@ async function handleIncomingMessage(data) {
               type: 'section',
               text: {
                 type: 'mrkdwn',
-                text: `*${classLabel} lead: ${name}*\n${phone}\n${contact?.city || ''}${contact?.state ? ', ' + contact.state : ''}\n\n"${content}"\n\n_Tagged positive. Approve to start qualification._`,
+                text: `*Positive lead: ${name}*\n${phone}\n${contact?.city || ''}${contact?.state ? ', ' + contact.state : ''}\n\nThey said: "${content}"\n\nDraft reply: _"${draft}"_`,
               },
             },
             {
@@ -795,10 +792,10 @@ async function handleIncomingMessage(data) {
               elements: [
                 {
                   type: 'button',
-                  text: { type: 'plain_text', text: 'Start Qualification' },
+                  text: { type: 'plain_text', text: 'Send Draft' },
                   style: 'primary',
-                  action_id: `qualify_${posActionId}`,
-                  value: JSON.stringify({ leadId, name, phone, phoneProfileId }),
+                  action_id: `approve_${posActionId}`,
+                  value: JSON.stringify({ leadId, name, phone, phoneProfileId, draft }),
                 },
                 {
                   type: 'button',
@@ -814,13 +811,13 @@ async function handleIncomingMessage(data) {
                 },
               ],
             },
-          ], `${classLabel} lead: ${name} — "${content}"`);
+          ], `Positive lead: ${name} — "${content}"`);
         } else {
           await sendSlackNotification(
-            `*${classLabel} lead: ${name}*\n${phone}\n"${content}"\n_Tagged positive — needs your approval to qualify_`
+            `*Positive lead: ${name}*\n${phone}\n"${content}"\nDraft: "${draft}"\n_Awaiting your approval_`
           );
         }
-        console.log(`[Action] ${classLabel} lead ${name} — tagged positive, awaiting Slack approval.`);
+        console.log(`[Action] Positive lead ${name} — tagged, draft sent to Slack for approval.`);
         break;
       }
     }
@@ -1052,30 +1049,19 @@ function startHttpServer() {
 
             switch (actionType) {
               case 'approve': {
-                // Send the draft message
+                // Send the draft message, then auto-start qualification
                 if (draft) {
                   await sendMessage(leadId, draft, contact);
                   console.log(`[Slack] Approved and sent draft to ${leadId}`);
                 }
                 pendingApprovals.delete(actionId);
 
-                // Update Slack message
-                await respondToSlackInteraction(payload.response_url,
-                  `*Approved* -- Message sent to ${contact?.firstName || 'lead'}.`
-                );
-                break;
-              }
-
-              case 'qualify': {
-                // Start qualification flow for this lead
-                const qFlow = startQualificationFlow(leadId, contact);
-                const qFirstStep = qFlow.steps[0];
-                await sendMessage(leadId, `Hey! I'd love to help you find the best coverage. I just need to ask a few quick questions.\n\n${qFirstStep.question}`, contact);
-
-                pendingApprovals.delete(actionId);
+                // Auto-start qualification flow after sending the approved reply
+                startQualificationFlow(leadId, contact);
+                console.log(`[Slack] Qualification flow started for ${leadId} — will pick up on their next reply`);
 
                 await respondToSlackInteraction(payload.response_url,
-                  `*Qualification started* for ${contact?.firstName || 'lead'}.`
+                  `*Sent* to ${contact?.firstName || 'lead'}. Qualification will begin when they reply.`
                 );
                 break;
               }
