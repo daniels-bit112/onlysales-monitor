@@ -41,6 +41,7 @@ const CONFIG = {
   slackWebhookUrl: process.env.SLACK_WEBHOOK_URL || '',
   slackBotToken: process.env.SLACK_BOT_TOKEN || '',     // For interactive messages
   slackChannelId: process.env.SLACK_CHANNEL_ID || '',    // Channel to post to
+  slackUserId: process.env.SLACK_USER_ID || 'U0AN7ALKR0W', // Your Slack user ID for @mentions
 
   // Tag IDs
   notInterestedTagId: '66f7051ab1a7024acc4477b9',
@@ -658,7 +659,7 @@ async function handleQualificationStep(leadId, content, contact) {
       : '';
 
     const summary =
-      `*QUALIFIED LEAD: ${name}*\n` +
+      `<@${CONFIG.slackUserId}> *QUALIFIED LEAD: ${name}*\n` +
       `Phone: ${phone}\n` +
       `${contact?.city || ''}${contact?.state ? ', ' + contact.state : ''}\n\n` +
       `*Qualification Summary:*\n` +
@@ -873,7 +874,7 @@ async function handleIncomingMessage(data) {
               type: 'section',
               text: {
                 type: 'mrkdwn',
-                text: `*Positive lead: ${name}*\n${phone}\n${contact?.city || ''}${contact?.state ? ', ' + contact.state : ''}\n\nThey said: "${content}"\n\nDraft reply: _"${draft}"_`,
+                text: `<@${CONFIG.slackUserId}> *Positive lead: ${name}*\n${phone}\n${contact?.city || ''}${contact?.state ? ', ' + contact.state : ''}\n\nThey said: "${content}"\n\nDraft reply: _"${draft}"_`,
               },
             },
             {
