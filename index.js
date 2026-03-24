@@ -1,13 +1,17 @@
 /**
- * OnlySales 24/7 Monitoring Bot v2.0
+ * OnlySales 24/7 Monitoring Bot v2.1
  *
- * Features:
- *   - Socket.io connection to OnlySales CRM
- *   - Smart message classification (English + Spanish, edge cases)
- *   - Lead qualification flow with dynamic family plan deviation
- *   - Slack interactive approvals (approve/edit/reject via buttons)
- *   - Auto warm-close for not-interested leads
- *   - HTTP server for Slack interaction payloads
+ * Flow:
+ *   1. Lead texts in → classify message
+ *   2. Not interested (agitated/complaint/polite no) → auto-tag "not interested", no reply
+ *   3. Positive (interested/question/unclear) → tag "positive", draft context-aware reply,
+ *      send to Slack for approval with Send / Not Interested / I'll Handle It buttons
+ *   4. You approve → draft sent to lead, qualification flow starts automatically
+ *   5. Qualification: coverage_for → (family DOB if needed) → preexisting → providers → tax status → income
+ *      - Pre-scans lead's messages to skip questions they already answered
+ *      - Forward-scans each reply to catch multi-answer responses
+ *      - Natural acknowledgments between questions
+ *   6. Qualified → summary sent to Slack with Mark as Called / Remind Me Later
  *
  * Usage:
  *   1. npm install
@@ -391,46 +395,101 @@ function classifyMessage(content) {
 }
 
 // ============================================================
-// 4-STEP LEAD QUALIFICATION FLOW
+// QUALIFICATION FLOW (dynamic steps, context-aware)
 // ============================================================
+// Helper: detect coverage_for from free-form text
+function detectCoverageFor(msg) {
+  const lower = msg.toLowerCase();
+  const familyKeywords = ['family', 'spouse', 'wife', 'husband', 'kid', 'kids', 'child', 'children',
+    'son', 'daughter', 'dependent', 'dependents', 'partner', 'both of us', 'me and my',
+    'two', 'three', 'four', '2 people', '3 people', '4 people', 'couple', 'plus my'];
+  const justMeKeywords = ['just me', 'only me', 'myself', 'just myself', 'solo', 'individual',
+    'for me', 'for myself', 'only myself', 'just for me', 'coverage for me'];
+  const isFamily = familyKeywords.some(kw => lower.includes(kw));
+  const isJustMe = justMeKeywords.some(kw => lower.includes(kw));
+  if (isFamily && !isJustMe) return { value: msg.trim(), needsFamilyDob: true };
+  if (isJustMe && !isFamily) return { value: 'Just me', needsFamilyDob: false };
+  if (isFamily) return { value: msg.trim(), needsFamilyDob: true };
+  return null; // couldn't detect — need to ask
+}
+
+// Helper: detect pre-existing conditions from free-form text
+function detectPreexisting(msg) {
+  const lower = msg.toLowerCase();
+  const keywords = ['diabetes', 'diabetic', 'asthma', 'blood pressure', 'hypertension',
+    'heart', 'cancer', 'arthritis', 'cholesterol', 'thyroid', 'copd', 'seizure', 'epilepsy',
+    'depression', 'anxiety', 'bipolar', 'insulin', 'metformin', 'medication', 'medications',
+    'taking pills', 'prescription', 'pre-existing', 'preexisting', 'condition',
+    'no conditions', 'no medications', 'nothing', 'none', 'healthy', 'no pre-existing',
+    'no preexisting', 'no meds'];
+  if (keywords.some(kw => lower.includes(kw))) return { value: msg.trim() };
+  return null;
+}
+
+// Helper: detect tax status from free-form text
+function detectTaxStatus(msg) {
+  const lower = msg.toLowerCase();
+  // Only detect if it's clearly stated (not ambiguous)
+  if (lower.includes('file single') || lower.includes('filing single') || (lower.includes('single') && lower.includes('tax'))) return { value: 'Single' };
+  if (lower.includes('head of household') || lower.includes('hoh')) return { value: 'Head of Household' };
+  if (lower.includes('filing jointly') || lower.includes('married filing')) return { value: 'Married Filing Jointly' };
+  return null;
+}
+
+// Helper: detect income from free-form text
+function detectIncome(msg) {
+  // Look for dollar amounts like $50k, $50,000, 50000, etc.
+  const incomeMatch = msg.match(/\$?\s*\d{2,3}[,.]?\d{0,3}\s*(?:k|K|thousand|a year|per year|annually)?/);
+  if (incomeMatch) return { value: incomeMatch[0].trim() };
+  return null;
+}
+
+// Pre-scan a message and extract any qualification info the lead already gave
+function prescanMessage(msg) {
+  const extracted = {};
+  const coverageFor = detectCoverageFor(msg);
+  if (coverageFor) extracted.coverage_for = coverageFor;
+  const preexisting = detectPreexisting(msg);
+  if (preexisting) extracted.preexisting = preexisting;
+  const taxStatus = detectTaxStatus(msg);
+  if (taxStatus) extracted.tax_status = taxStatus;
+  const income = detectIncome(msg);
+  if (income) extracted.income = income;
+  return extracted;
+}
+
+// Acknowledgment phrases to make the bot feel conversational
+const ACKS = ['Got it.', 'Perfect.', 'Okay great.', 'Thanks for that.', 'Appreciate it.'];
+function randomAck() { return ACKS[Math.floor(Math.random() * ACKS.length)]; }
+
 // Base qualification steps (family_dob step gets inserted dynamically if needed)
 const QUALIFICATION_STEPS = [
   {
     id: 'coverage_for',
-    question: "Is this coverage just for you, or are you looking for a plan that covers anyone else too? (spouse, kids, family, etc.)",
+    question: "Is this just for you, or are you looking to cover anyone else too?",
     parse: (msg) => {
-      const lower = msg.toLowerCase();
-      const familyKeywords = ['family', 'spouse', 'wife', 'husband', 'kid', 'kids', 'child', 'children',
-        'son', 'daughter', 'dependent', 'dependents', 'partner', 'both', 'us', 'we',
-        'two', 'three', 'four', '2', '3', '4', 'couple', 'married', 'plus'];
-      const justMeKeywords = ['just me', 'only me', 'myself', 'just myself', 'solo', 'individual', 'one', '1', 'no'];
-      const isFamily = familyKeywords.some(kw => lower.includes(kw));
-      const isJustMe = justMeKeywords.some(kw => lower.includes(kw));
-      // If they mention family keywords (even with some "no" mixed in), treat as family
-      if (isFamily && !isJustMe) return { value: msg.trim(), valid: true, needsFamilyDob: true };
-      if (isJustMe && !isFamily) return { value: 'Just me', valid: true, needsFamilyDob: false };
-      // Ambiguous — default to checking; if they mention any family keyword, ask for DOB
-      if (isFamily) return { value: msg.trim(), valid: true, needsFamilyDob: true };
-      return { value: msg.trim(), valid: true, needsFamilyDob: false };
+      const result = detectCoverageFor(msg);
+      if (result) return { value: result.value, valid: true, needsFamilyDob: result.needsFamilyDob };
+      return { value: msg.trim() || 'Just me', valid: true, needsFamilyDob: false };
     },
   },
   {
     id: 'preexisting',
-    question: "Do you have any pre-existing conditions or are you currently taking any medications? I want to make sure everything is covered for you.",
+    question: "Do you have any pre-existing conditions or take any medications? Just want to make sure everything gets covered.",
     parse: (msg) => {
       return { value: msg.trim(), valid: true };
     },
   },
   {
     id: 'providers',
-    question: "Do you have any doctors, clinics, hospitals, or specialists you'd like to keep seeing? I'll check which plans they accept.",
+    question: "Any doctors, specialists, or hospitals you'd want to keep seeing? I'll make sure they're in-network.",
     parse: (msg) => {
       return { value: msg.trim(), valid: true };
     },
   },
   {
     id: 'tax_status',
-    question: "What's your tax filing status? (Single, Head of Household, Married Filing Jointly, or are you claiming any dependents?)",
+    question: "How do you file your taxes? Single, Head of Household, Married Filing Jointly, or claiming dependents?",
     parse: (msg) => {
       const lower = msg.toLowerCase();
       if (lower.includes('single')) return { value: 'Single', valid: true };
@@ -442,7 +501,7 @@ const QUALIFICATION_STEPS = [
   },
   {
     id: 'income',
-    question: "And what's your estimated household income for this year? Just a rough number is fine — it helps me find plans you may qualify for.",
+    question: "Last one — roughly what's your household income for this year? Ballpark is fine, it helps me see what you qualify for.",
     parse: (msg) => {
       return { value: msg.trim(), valid: true };
     },
@@ -452,7 +511,7 @@ const QUALIFICATION_STEPS = [
 // The family DOB step that gets dynamically inserted after coverage_for when needed
 const FAMILY_DOB_STEP = {
   id: 'family_dob',
-  question: "Got it! I'll need the date of birth for each additional person you'd like covered. Can you list them for me? (e.g. 03/15/1990, 06/22/2015)",
+  question: "No problem! I'll need the date of birth for each person you want covered. Can you list them out for me?",
   parse: (msg) => {
     return { value: msg.trim(), valid: true };
   },
@@ -462,7 +521,7 @@ function getQualificationFlow(leadId) {
   return qualificationFlows.get(leadId) || null;
 }
 
-function startQualificationFlow(leadId, contact) {
+function startQualificationFlow(leadId, contact, originalMessage) {
   const flow = {
     step: 0,
     data: {},
@@ -471,6 +530,32 @@ function startQualificationFlow(leadId, contact) {
     leadId,
     lastActivity: Date.now(),
   };
+
+  // Pre-scan the lead's original message to extract info they already gave
+  if (originalMessage) {
+    const extracted = prescanMessage(originalMessage);
+    for (const [stepId, result] of Object.entries(extracted)) {
+      flow.data[stepId] = result.value;
+      console.log(`[Qualify] Pre-filled "${stepId}" from original message: "${result.value}"`);
+
+      // Handle family DOB insertion if coverage_for detected family
+      if (stepId === 'coverage_for' && result.needsFamilyDob) {
+        // Find coverage_for index and insert family_dob after it
+        const covIdx = flow.steps.findIndex(s => s.id === 'coverage_for');
+        if (covIdx !== -1) {
+          flow.steps.splice(covIdx + 1, 0, FAMILY_DOB_STEP);
+          console.log(`[Qualify] Family plan detected from prescan — inserted family_dob step`);
+        }
+      }
+    }
+
+    // Skip past any steps that were pre-filled
+    while (flow.step < flow.steps.length && flow.data[flow.steps[flow.step].id] !== undefined) {
+      console.log(`[Qualify] Skipping step ${flow.step} (${flow.steps[flow.step].id}) — already answered`);
+      flow.step++;
+    }
+  }
+
   qualificationFlows.set(leadId, flow);
   return flow;
 }
@@ -518,18 +603,35 @@ async function handleQualificationStep(leadId, content, contact) {
 
   // If they just answered coverage_for and need family coverage, insert family_dob step next
   if (currentStep.id === 'coverage_for' && parsed.needsFamilyDob) {
-    // Insert FAMILY_DOB_STEP right after coverage_for (at position flow.step + 1)
     flow.steps.splice(flow.step + 1, 0, FAMILY_DOB_STEP);
     console.log(`[Qualify] Family plan detected — inserted family_dob step for lead ${leadId}`);
+  }
+
+  // Forward-scan: check if their reply also answers upcoming steps
+  // (e.g. "No conditions, I file single" answers preexisting + tax_status in one message)
+  const extracted = prescanMessage(content);
+  for (let i = flow.step + 1; i < flow.steps.length; i++) {
+    const futureStep = flow.steps[i];
+    if (extracted[futureStep.id] && !flow.data[futureStep.id]) {
+      flow.data[futureStep.id] = extracted[futureStep.id].value;
+      console.log(`[Qualify] Forward-filled "${futureStep.id}" from same reply: "${extracted[futureStep.id].value}"`);
+    }
   }
 
   // Move to next step
   flow.step++;
 
+  // Skip any steps that got forward-filled
+  while (flow.step < flow.steps.length && flow.data[flow.steps[flow.step].id] !== undefined) {
+    console.log(`[Qualify] Skipping step ${flow.step} (${flow.steps[flow.step].id}) — already answered`);
+    flow.step++;
+  }
+
   if (flow.step < flow.steps.length) {
-    // Send next question
+    // Send next question with a natural acknowledgment
     const nextStep = flow.steps[flow.step];
-    await sendMessage(leadId, nextStep.question, contact);
+    const ack = randomAck();
+    await sendMessage(leadId, `${ack} ${nextStep.question}`, contact);
     console.log(`[Qualify] Next step ${flow.step}: ${nextStep.id}`);
   } else {
     // Qualification complete — send summary to Slack for approval
@@ -591,7 +693,7 @@ async function handleQualificationStep(leadId, content, contact) {
     }
 
     // Send a holding message to the lead
-    await sendMessage(leadId, "Thanks for all that info! Let me put together the best options for you. Someone will be in touch shortly!", contact);
+    await sendMessage(leadId, "That's everything I need! I'm going to put together the best options for you and we'll be in touch real soon.", contact);
 
     console.log(`[Qualify] Lead ${leadId} fully qualified. Summary sent to Slack.`);
   }
@@ -607,22 +709,6 @@ setInterval(() => {
     }
   }
 }, 60 * 60 * 1000); // Check every hour
-
-// ============================================================
-// WARM CLOSER TEMPLATES
-// ============================================================
-const WARM_CLOSERS = [
-  "No worries at all! If you ever need help with insurance down the road, feel free to reach out. Have a great day!",
-  "No worries at all! Glad you got something in place. If you ever need to compare plans or want a second opinion, feel free to reach out. Have a great day!",
-  "Totally understand! If anything changes or you want to explore other options in the future, don't hesitate to reach out. Have a wonderful day!",
-  "No problem at all! If you ever want a second opinion on your coverage, I'm here to help. Have a great one!",
-  "All good! Wishing you the best. If your situation ever changes, don't hesitate to reach out!",
-  "Understood! Hope you're all set. Feel free to text back anytime if you need anything in the future!",
-];
-
-function getRandomCloser() {
-  return WARM_CLOSERS[Math.floor(Math.random() * WARM_CLOSERS.length)];
-}
 
 // ============================================================
 // MESSAGE HANDLER
@@ -646,15 +732,6 @@ async function handleIncomingMessage(data) {
       : (msg?.body || msg?.text || msg?.content || data.content || '');
     const leadId = data.leadId;
     const type = data.type || 'inbound'; // incoming-message events are always inbound
-
-    // Log message details for debugging
-    const msgType = (typeof msg === 'object' && msg?.type) || '';
-    const rawDataType = (typeof msg === 'object' && msg?.rawDataType) || '';
-    console.log(`[Handler] Data keys: ${Object.keys(data).join(',')}, msg.type=${msgType}, rawDataType=${rawDataType}`);
-    console.log(`[Handler] message type: ${typeof msg}, content resolved: "${content}"`);
-    if (typeof msg === 'object' && msg) {
-      console.log(`[Handler] message keys: ${Object.keys(msg).join(',')}`);
-    }
 
     // Skip if we recently sent this exact message to this lead (server echo dedup)
     const dedupKey = `${leadId}:${content}`;
@@ -705,10 +782,8 @@ async function handleIncomingMessage(data) {
     const phone = contact?.phoneNumber || data.phoneNumber || data.phone || 'unknown';
     const phoneProfileId = contact?.phoneProfiles?.[0] || contact?.defaultPhoneNumber || data.phoneProfile || data.phone || '';
     const telnyxPhoneId = (typeof msg === 'object' && msg?.telnyxPhoneId) || '';
-    console.log(`[Contact] leadId=${leadId}, name="${name}", phone="${phone}", phoneProfileId="${phoneProfileId}", telnyxPhoneId="${telnyxPhoneId}", contact API returned: ${contact ? 'yes' : 'null'}`);
+    console.log(`[Contact] ${name} (${phone}) — leadId=${leadId}`);
     if (contact) {
-      console.log(`[Contact] API keys: ${Object.keys(contact).join(',')}`);
-      console.log(`[Contact] phoneProfiles: ${JSON.stringify(contact.phoneProfiles)}, defaultPhoneNumber: ${contact.defaultPhoneNumber}`);
       // Ensure contact has phone routing data
       if (!contact.phoneProfiles?.length && phoneProfileId) {
         contact.phoneProfiles = [phoneProfileId];
@@ -741,7 +816,6 @@ async function handleIncomingMessage(data) {
           });
         });
         activeConversationLeadId = leadId;
-        console.log(`[PreInit] Conversation pre-initialized for lead ${leadId}`);
       } catch (err) {
         console.error(`[PreInit] Error: ${err.message}`);
       }
@@ -864,44 +938,28 @@ async function sendMessage(leadId, message, contact) {
     }
   }
 
-  console.log(`[SendMsg] Sending to lead ${leadId}, phoneId=${phoneId}, msg="${message.substring(0, 50)}..."`);
+  console.log(`[SendMsg] → ${leadId}: "${message.substring(0, 60)}..."`);
 
-  // Conversation should already be pre-initialized from handleIncomingMessage.
-  // If not (e.g. after disconnect), init now with ack callback.
+  // Ensure conversation is initialized before sending
   if (activeConversationLeadId !== leadId) {
-    console.log(`[SendMsg] Conversation not pre-initialized, initializing now...`);
     try {
       await new Promise((resolve) => {
-        const timeout = setTimeout(() => {
-          console.log('[SendMsg] conversationInit: no ack after 3s');
-          resolve();
-        }, 3000);
+        const timeout = setTimeout(resolve, 3000);
         socket.emit('conversationInit', {
-          leadId,
-          phoneId,
-          isTransferred: false,
+          leadId, phoneId, isTransferred: false,
         }, (response) => {
           clearTimeout(timeout);
-          console.log(`[SendMsg] conversationInit ack for lead ${leadId}`);
           resolve(response);
         });
       });
       activeConversationLeadId = leadId;
     } catch (err) {
-      console.error(`[SendMsg] conversationInit error: ${err.message}`);
+      console.error(`[SendMsg] Init error: ${err.message}`);
     }
-  } else {
-    console.log(`[SendMsg] Conversation already active for lead ${leadId}`);
   }
 
   // Send the message
-  socket.volatile.emit('sendMessage', {
-    message,
-    scheduledAt: null,
-    images: [],
-  });
-
-  console.log(`[SendMsg] sendMessage emitted for lead ${leadId}`);
+  socket.volatile.emit('sendMessage', { message, scheduledAt: null, images: [] });
 
   // MANDATORY delay after every send — ensures consecutive messages are in separate
   // websocket frames and the server fully processes each one before the next arrives.
@@ -910,35 +968,79 @@ async function sendMessage(leadId, message, contact) {
 }
 
 // ============================================================
-// DRAFT GENERATION
+// DRAFT GENERATION (context-aware)
 // ============================================================
 function generateDraft(incomingMessage, contact) {
   const lower = incomingMessage.toLowerCase();
+  const firstName = contact?.firstName || '';
 
+  // Pre-scan to see what they already told us
+  const already = prescanMessage(incomingMessage);
+  const alreadyKnowsCoverage = !!already.coverage_for;
+
+  // Figure out the right NEXT question to tee up (skip what's already answered)
+  // This makes the draft flow naturally into qualification
+  let nextAsk = '';
+  if (!alreadyKnowsCoverage) {
+    nextAsk = 'Is this just for you or are you looking to cover anyone else too?';
+  } else {
+    nextAsk = 'Do you have any pre-existing conditions or medications I should know about so we can make sure everything is covered?';
+  }
+
+  // --- Match what the lead actually said ---
+
+  // They asked about pricing
   if (lower.includes('price') || lower.includes('cost') || lower.includes('how much') ||
-      lower.includes('rate') || lower.includes('cuanto') || lower.includes('cuánto')) {
-    return "Great question! To find the best rates for you I'd just need a little info. Is this for just yourself or a family plan?";
+      lower.includes('rate') || lower.includes('cuanto') || lower.includes('cuánto') ||
+      lower.includes('affordable') || lower.includes('cheap')) {
+    return `Rates depend on a few things so I can get you an accurate number. ${nextAsk}`;
   }
 
+  // They asked about plans/options
   if (lower.includes('plan') || lower.includes('option') || lower.includes('what do you have') ||
-      lower.includes('que planes') || lower.includes('qué planes')) {
-    return "I'd love to help you find the right plan! First off, would this be for just yourself or are you looking to cover family members too?";
+      lower.includes('que planes') || lower.includes('qué planes') || lower.includes('what kind')) {
+    return `There are a few different options depending on your situation. ${nextAsk}`;
   }
 
+  // They want a call
+  if (lower.includes('call me') || lower.includes('give me a call') || lower.includes('can you call') ||
+      lower.includes('llamar') || lower.includes('llam')) {
+    return "For sure! Before I call, let me grab a couple details so I can have the right info ready for you. What's the best time to reach you?";
+  }
+
+  // They mentioned specific coverage (individual/family/dental/vision)
+  if (lower.includes('individual') || lower.includes('just me') || lower.includes('myself') || lower.includes('for me')) {
+    return "Got it, just for you. Do you have any pre-existing conditions or medications I should know about so we can make sure everything is covered?";
+  }
+  if (lower.includes('family') || lower.includes('wife') || lower.includes('husband') || lower.includes('kids') ||
+      lower.includes('spouse') || lower.includes('children')) {
+    return "Got it, for the family. I'll need the date of birth for anyone else you'd like covered. Can you send those over?";
+  }
+  if (lower.includes('dental') || lower.includes('vision')) {
+    return "I can definitely look into that for you. A lot of plans bundle dental and vision in — let me check what's available. " + nextAsk;
+  }
+
+  // They asked about enrollment/timing
+  if (lower.includes('when') || lower.includes('open enrollment') || lower.includes('deadline') ||
+      lower.includes('too late') || lower.includes('still enroll')) {
+    return "You're still good — there are options available right now. Let me see what fits. " + nextAsk;
+  }
+
+  // Simple affirmative (yes, sure, interested, ok, etc.)
   if (lower.includes('yes') || lower.includes('sure') || lower.includes('interested') ||
-      lower.includes('tell me more') || lower.includes('info') || lower.includes('si') || lower.includes('sí')) {
-    return "Awesome! I'd love to help you out. Are you looking for coverage for just yourself or for your family too?";
+      lower.includes('tell me more') || lower.includes('info') || lower.includes('si') ||
+      lower.includes('sí') || lower.includes('ok') || lower.includes('yeah') ||
+      lower.includes('yep') || lower === 'y') {
+    return `Sounds good! Let me find the best options for you. ${nextAsk}`;
   }
 
-  if (lower.includes('call') || lower.includes('llamar') || lower.includes('llam')) {
-    return "I'd be happy to give you a call! When works best for you?";
+  // They asked a question
+  if (lower.includes('?')) {
+    return `Good question! Let me look into that for you. To get you the most accurate info — ${nextAsk.toLowerCase()}`;
   }
 
-  if (lower.includes('when') || lower.includes('open enrollment') || lower.includes('deadline')) {
-    return "Great timing on checking! I can walk you through the current enrollment options. Are you looking for health, dental, or vision coverage?";
-  }
-
-  return "Hey, thanks for getting back to me! I'd love to help you find the right coverage. Quick question — would this be for just yourself or a family plan?";
+  // Default fallback
+  return `Thanks for reaching out! I'd love to help you find the right coverage. ${nextAsk}`;
 }
 
 // ============================================================
@@ -1060,12 +1162,16 @@ function startHttpServer() {
                 }
                 pendingApprovals.delete(actionId);
 
-                // Auto-start qualification flow after sending the approved reply
-                startQualificationFlow(leadId, contact);
-                console.log(`[Slack] Qualification flow started for ${leadId} — will pick up on their next reply`);
+                // Auto-start qualification flow, passing the lead's original message
+                // so we can skip questions they already answered
+                const originalMsg = pending.content || '';
+                const approveFlow = startQualificationFlow(leadId, contact, originalMsg);
+                const skippedCount = approveFlow.step;
+                const remainingSteps = approveFlow.steps.length - approveFlow.step;
+                console.log(`[Slack] Qualification flow started for ${leadId} — pre-filled ${skippedCount} steps, ${remainingSteps} remaining`);
 
                 await respondToSlackInteraction(payload.response_url,
-                  `*Sent* to ${contact?.firstName || 'lead'}. Qualification will begin when they reply.`
+                  `*Sent* to ${contact?.firstName || 'lead'}. Qualification started (${skippedCount} already answered, ${remainingSteps} to go).`
                 );
                 break;
               }
