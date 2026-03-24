@@ -827,32 +827,36 @@ async function sendMessage(leadId, message, contact) {
 
   console.log(`[SendMsg] Sending to lead ${leadId}, phoneId=${phoneId}, msg="${message.substring(0, 50)}..."`);
 
-  // Step 1: Initialize the conversation (wait for server ack before sending)
+  // Step 1: Initialize the conversation — NO ack callback (ack causes server-side double-processing)
+  // Instead, wait for the 'conversation-log' event as confirmation
   if (activeConversationLeadId !== leadId) {
     try {
       await new Promise((resolve) => {
         const timeout = setTimeout(() => {
-          console.log('[SendMsg] conversationInit: no callback after 3s, proceeding anyway');
+          console.log('[SendMsg] conversationInit: no conversation-log after 5s, proceeding anyway');
+          socket.off('conversation-log', onConvLog);
           resolve();
-        }, 3000);
+        }, 5000);
 
+        // Listen for conversation-log event as confirmation that init completed
+        const onConvLog = (data) => {
+          clearTimeout(timeout);
+          socket.off('conversation-log', onConvLog);
+          console.log(`[SendMsg] conversationInit confirmed via conversation-log event`);
+          resolve();
+        };
+        socket.on('conversation-log', onConvLog);
+
+        // Plain emit — NO callback
         socket.emit('conversationInit', {
           leadId,
           phoneId,
           isTransferred: false,
-        }, (response) => {
-          clearTimeout(timeout);
-          console.log(`[SendMsg] conversationInit ack received for lead ${leadId}`);
-          resolve(response);
         });
+        console.log(`[SendMsg] conversationInit emitted (no ack) for lead ${leadId}`);
       });
       activeConversationLeadId = leadId;
       console.log(`[SendMsg] Conversation initialized for lead ${leadId}`);
-
-      // CRITICAL: Wait 2s after init before sending — the server double-processes
-      // sendMessage when it arrives immediately after conversationInit
-      await new Promise(resolve => setTimeout(resolve, 2000));
-      console.log(`[SendMsg] Post-init delay complete, now sending`);
     } catch (err) {
       console.error(`[SendMsg] conversationInit error: ${err.message}`);
     }
@@ -860,7 +864,7 @@ async function sendMessage(leadId, message, contact) {
     console.log(`[SendMsg] Conversation already active for lead ${leadId}, skipping init`);
   }
 
-  // Step 2: Send the message — plain emit, NO callback, NO volatile
+  // Step 2: Send the message — plain emit
   socket.emit('sendMessage', {
     message,
     scheduledAt: null,
