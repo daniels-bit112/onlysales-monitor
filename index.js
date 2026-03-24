@@ -631,6 +631,29 @@ async function handleIncomingMessage(data) {
     if (type !== 'inbound') return;
     if (!String(content).trim()) return; // Skip empty messages
 
+    // ===== SYNCHRONOUS LOCK: Prevent concurrent processing for the same lead =====
+    // This MUST happen before any async work (API calls, socket emits, etc.)
+    // When a lead sends "Help" then "Hello" quickly, both events fire simultaneously.
+    // Without this lock, both would pass the guard and trigger duplicate sequences.
+    if (activeLeadConversations.has(leadId)) {
+      const elapsed = Date.now() - activeLeadConversations.get(leadId);
+      if (elapsed < 5 * 60 * 1000) { // 5-minute cooldown
+        console.log(`[Guard] Lead ${leadId} already being handled (${Math.round(elapsed / 1000)}s ago) — skipping "${content}"`);
+        return;
+      }
+    }
+
+    // Also check if this lead already has a pending Slack approval
+    const hasPending = [...pendingApprovals.values()].some(p => p.leadId === leadId);
+    if (hasPending) {
+      console.log(`[Guard] Lead ${leadId} has pending Slack approval — skipping "${content}"`);
+      return;
+    }
+
+    // Also check if lead is in qualification flow (handled separately below, but block here too)
+    // Set the lock IMMEDIATELY (synchronous) before any async work
+    activeLeadConversations.set(leadId, Date.now());
+
     console.log(`\n[Message] New inbound from lead ${leadId}: "${content}"`);
 
     const contact = await getContactInfo(leadId);
@@ -689,37 +712,6 @@ async function handleIncomingMessage(data) {
     if (qualificationFlows.has(leadId)) {
       await handleQualificationStep(leadId, content, contact);
       return;
-    }
-
-    // GUARD: Check if this lead already has a conversation in progress
-    // (pending Slack approval, or was recently handled). Prevents re-triggering
-    // the bot when a lead sends multiple messages like "Help", "Hello", "Yes help"
-    const hasPendingApproval = [...pendingApprovals.values()].some(p => p.leadId === leadId);
-    const lastHandled = activeLeadConversations.get(leadId);
-    const conversationCooldown = 5 * 60 * 1000; // 5 minutes
-
-    if (hasPendingApproval) {
-      console.log(`[Guard] Lead ${leadId} already has a pending Slack approval — skipping new message "${content}"`);
-      // Optionally notify Slack that the lead sent another message
-      await sendSlackNotification(`_${name} sent another message:_ "${content}"`);
-      return;
-    }
-
-    if (lastHandled && Date.now() - lastHandled < conversationCooldown) {
-      console.log(`[Guard] Lead ${leadId} was recently handled (${Math.round((Date.now() - lastHandled) / 1000)}s ago) — skipping`);
-      await sendSlackNotification(`_${name} sent another message:_ "${content}"`);
-      return;
-    }
-
-    // Mark this lead as being handled
-    activeLeadConversations.set(leadId, Date.now());
-
-    // Clean old entries periodically
-    if (activeLeadConversations.size > 500) {
-      const now = Date.now();
-      for (const [id, ts] of activeLeadConversations) {
-        if (now - ts > conversationCooldown) activeLeadConversations.delete(id);
-      }
     }
 
     // Classify the message
@@ -917,15 +909,19 @@ async function sendMessage(leadId, message, contact) {
     console.log(`[SendMsg] Conversation already active for lead ${leadId}`);
   }
 
-  // Send the message — volatile emit (prevents socket.io from buffering this packet,
-  // so if the transport disconnects right after, the packet is NOT replayed on reconnect)
+  // Send the message
   socket.volatile.emit('sendMessage', {
     message,
     scheduledAt: null,
     images: [],
   });
 
-  console.log(`[SendMsg] sendMessage emitted (volatile) for lead ${leadId}`);
+  console.log(`[SendMsg] sendMessage emitted for lead ${leadId}`);
+
+  // MANDATORY delay after every send — ensures consecutive messages are in separate
+  // websocket frames and the server fully processes each one before the next arrives.
+  // Without this, rapid back-to-back emits get batched and the server double-processes.
+  await new Promise(resolve => setTimeout(resolve, 2000));
 }
 
 // ============================================================
